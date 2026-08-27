@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import httpx
 
 from daily_picks import __version__
-from daily_picks.config import DEFAULT_CONFIG_PATH, ConfigError, load_config, write_default_config
+from daily_picks.config import DEFAULT_CONFIG_PATH, ConfigError, RootConfig, load_config, write_default_config
+from daily_picks.log import setup_logging
+from daily_picks.models import Article
+from daily_picks.sources import SourceAdapter, build_adapters
 from daily_picks.storage import Storage
 
+logger = logging.getLogger("daily_picks.cli")
+
 _ENV_EXAMPLE = "DEEPSEEK_API_KEY=\nWECOM_WEBHOOK_KEY=\nSERVERCHAN_SENDKEY=\n"
+
+# 单源采集超时（秒）。模块级常量便于测试注入（T-SRC-ALL-02 monkeypatch 缩短），见开发文档 §4.18 步骤 4
+SOURCE_TIMEOUT_S = 30.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _not_implemented(command: str) -> int:
     """M0 阶段未实现命令的统一占位：提示并返回 0。"""
-    print(f"命令 `{command}` 尚未实现（M0 脚手架阶段，后续里程碑完成）。")
+    print(f"命令 `{command}` 尚未实现（后续里程碑完成）。")
     return 0
 
 
@@ -54,7 +68,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     """init 子命令：生成 config.yaml、.env.example（缺失时）并初始化数据库。"""
     cfg_path = Path(DEFAULT_CONFIG_PATH)
     if cfg_path.exists() and not args.force:
-        answer = input(f"{cfg_path} 已存在，是否覆盖？[y/N] ").strip().lower()
+        try:
+            answer = input(f"{cfg_path} 已存在，是否覆盖？[y/N] ").strip().lower()
+        except EOFError:
+            # 无 stdin 场景（如管道/重定向）：视为取消，优雅退出而非"未预期的错误"
+            print("未检测到交互输入（stdin 已关闭），视为取消；如需覆盖请加 --force。")
+            return 0
         if answer not in ("y", "yes"):
             print("已取消，未做任何修改。")
             return 0
@@ -84,6 +103,105 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """run 子命令：立即执行一次完整流程（M1：采集→去重入库→统计输出）。"""
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    return asyncio.run(run_once(cfg, dry_run=args.dry_run))
+
+
+async def _fetch_one(adapter: SourceAdapter, cfg: RootConfig,
+                     client: httpx.AsyncClient) -> tuple[str, list[Article] | None, str | None]:
+    """单源采集：asyncio.wait_for 超时 + 全异常隔离；返回 (源名, 文章|None, 错误描述|None)。"""
+    section = getattr(cfg.sources, adapter.name)
+    try:
+        items = await asyncio.wait_for(adapter.fetch(section, client), timeout=SOURCE_TIMEOUT_S)
+        return adapter.name, items, None
+    except TimeoutError:
+        msg = f"超时（>{SOURCE_TIMEOUT_S:g}s）"
+        logger.warning("采集失败 source=%s: %s", adapter.name, msg)
+        return adapter.name, None, msg
+    except Exception as e:  # noqa: BLE001 —— 单源失败隔离（设计文档 §6.7 / R-001）
+        msg = f"{type(e).__name__}: {e}"
+        logger.warning("采集失败 source=%s: %s", adapter.name, msg)
+        return adapter.name, None, msg
+
+
+async def _collect(adapters: list[SourceAdapter],
+                   cfg: RootConfig) -> tuple[list[Article], dict[str, tuple[bool, str]]]:
+    """并发采集全部启用源；返回 (全部文章, {源名: (是否成功, 描述)})。"""
+    try:
+        # trust_env 默认开启：httpx 自动读取 HTTP_PROXY/HTTPS_PROXY（设计文档 §6.5，HN 走代理场景）
+        client = httpx.AsyncClient(timeout=SOURCE_TIMEOUT_S)
+    except ImportError as e:
+        # 环境代理不可用（如 socks5 代理但未装 socksio）：降级为直连，不中断整次运行
+        logger.warning("httpx 初始化失败（环境代理配置不可用），改用直连: %s", e)
+        client = httpx.AsyncClient(timeout=SOURCE_TIMEOUT_S, trust_env=False)
+    async with client:
+        results = await asyncio.gather(*(_fetch_one(a, cfg, client) for a in adapters))
+    collected: list[Article] = []
+    stats: dict[str, tuple[bool, str]] = {}
+    errors = {a.name: a.source_errors for a in adapters}
+    for name, items, err in results:
+        if items:
+            collected.extend(items)  # 部分成功的条目仍入库（失败隔离）
+        if err is not None:
+            stats[name] = (False, err)
+        elif errors.get(name, 0):
+            # 适配器内部吞掉的失败（§6.7 计数 source_errors）：如实标记
+            if items:
+                stats[name] = (False, f"获取 {len(items)} 条，{errors[name]} 个请求失败")
+            else:
+                stats[name] = (False, f"{errors[name]} 个请求全部失败")
+        else:
+            stats[name] = (True, f"{len(items)} 条")
+    return collected, stats
+
+
+async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
+    """完整流程（设计文档 §4.2 数据流）。返回 0=成功/推送，1=部分失败，2=致命错误。
+
+    M1 已实现步骤 1-5；步骤 6-10（LLM 精排→digest→推送→记账）由 M2/M3 填充。
+    """
+    # 步骤 1：日志 + Storage 初始化（建表/迁移）
+    setup_logging(level=cfg.logging.level, log_file=cfg.logging.file,
+                  max_bytes=cfg.logging.max_bytes, backup_count=cfg.logging.backup_count)
+    db_path = Path(cfg.storage.db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)  # data/ 运行时创建（目录结构 §2）
+    storage = Storage(db_path)
+    storage.init_schema()
+
+    # 步骤 2：当日日期（配置时区，幂等键）
+    run_date = datetime.now().astimezone(ZoneInfo(cfg.app.timezone)).strftime("%Y-%m-%d")
+
+    # 步骤 3：当日 digest_runs 幂等锁（同日重复触发返回已有 run id，设计文档 §5）
+    run_id = storage.start_digest_run(run_date, candidate_count=0)
+    logger.info("开始采集 run_id=%s run_date=%s", run_id, run_date)
+
+    # 步骤 4：并发采集（asyncio.gather + 每源 asyncio.wait_for 30s 超时，单源失败隔离）
+    adapters = build_adapters(cfg)
+    collected, stats = await _collect(adapters, cfg)
+
+    # 步骤 5：去重入库（返回新入库 id；新文章构 ScoredArticle 打分在 M2 步骤 4/7）
+    new_ids = storage.upsert_articles(collected)
+    print(f"采集 {len(collected)} 条，去重后 {len(new_ids)} 条")
+    print("各源采集情况:")
+    for name, (ok, detail) in stats.items():
+        print(f"  - {name}: {'成功' if ok else '失败'}（{detail}）")
+    logger.info("采集 %d 条，去重后新入库 %d 条 run_id=%s", len(collected), len(new_ids), run_id)
+    failed = [name for name, (ok, _) in stats.items() if not ok]
+
+    # 步骤 6：weights = storage.get_interest_weights() 合并 config 关键词（config 优先）——M2 填充
+    # 步骤 7：candidates = select_candidates(...)；rank_and_pick(...)——M2 填充
+    # 步骤 8：digest_text = build_digest_text(...)——M3 填充
+    # 步骤 9：dry_run 写 logs/last_digest.md；否则 publisher.push()——M3 填充
+    # 步骤 10：finish_digest_run(...) 记账（token/cost/fallback）；输出摘要日志——M3 填充
+    print("LLM 精排将在 M2 实现")
+    logger.info("LLM 精排将在 M2 实现（M1 截止到采集与去重入库）")
+
+    # 全部源失败视为部分失败（对齐 T-E2E-06）；单源失败不影响整体（R-001）
+    return 1 if (stats and failed and len(failed) == len(stats)) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """argparse 入口；异常统一处理，返回退出码（0 成功 / 1 部分失败 / 2 致命错误）。"""
     parser = build_parser()
@@ -91,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "init": cmd_init,
-        "run": lambda _: _not_implemented("run"),
+        "run": cmd_run,
         "serve": lambda _: _not_implemented("serve"),
         "feedback": lambda _: _not_implemented("feedback"),
         "stats": lambda _: _not_implemented("stats"),
