@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -69,9 +70,11 @@ def run_forever(cfg: RootConfig) -> None:
     """
     scheduler = _make_scheduler(cfg)
     job = scheduler.get_jobs()[0]
+    now = datetime.now(ZoneInfo(cfg.app.timezone))
+    next_run = job.trigger.get_next_fire_time(None, now)  # APScheduler 3.11 Job.next_run_time 访问会抛 AttributeError
     print(f"调度已启动：每天 {cfg.schedule.time}（{cfg.app.timezone}）执行一次")
-    print(f"下次运行时间: {job.next_run_time}")
-    logger.info("调度启动 schedule.time=%s next_run=%s", cfg.schedule.time, job.next_run_time)
+    print(f"下次运行时间: {next_run}")
+    logger.info("调度启动 schedule.time=%s next_run=%s", cfg.schedule.time, next_run)
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

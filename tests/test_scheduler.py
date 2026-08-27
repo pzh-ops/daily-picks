@@ -144,7 +144,12 @@ class TestRunForever:
             def __init__(self, func, cfg):
                 self.func = func
                 self.args = [cfg]
-                self.next_run_time = "2026-08-28 08:00:00+08:00"
+
+                class FakeTrigger:
+                    def get_next_fire_time(self, prev, now):
+                        return "2026-08-28 08:00:00+08:00"
+
+                self.trigger = FakeTrigger()
 
         fake = FakeScheduler(sched._locked_run_once, None)
         monkeypatch.setattr(sched, "_make_scheduler", lambda cfg: fake)
