@@ -40,6 +40,11 @@ def mock_http():
 
 @pytest.fixture
 def frozen_now():
-    """冻结本地时间为 2026-08-27 08:00（UTC+8），并返回该时刻 naive datetime。"""
-    with freeze_time("2026-08-27 08:00:00", tz_offset=8):
+    """冻结本地时间为 2026-08-27 08:00（UTC+8），并返回该时刻 naive datetime。
+
+    real_asyncio=True：只冻结墙钟，不冻结事件循环的单调时钟——否则 freezegun 冻结
+    time.monotonic 会导致 asyncio.sleep/wait_for 的定时器永不触发，async 用例挂死
+    （如 tenacity 重试退避等待）。
+    """
+    with freeze_time("2026-08-27 08:00:00", tz_offset=8, real_asyncio=True):
         yield datetime(2026, 8, 27, 8, 0, 0)

@@ -67,6 +67,19 @@ class TestStorage:
         assert row["cost_usd"] == pytest.approx(0.0008184)
         assert row["fallback_used"] == 1
 
+    def test_get_digest_run(self, tmp_db):  # M3 补充：幂等跳过推送需读取 pushed/channel 状态
+        rid = tmp_db.start_digest_run("2026-08-27", candidate_count=3)
+        assert tmp_db.get_digest_run(rid)["pushed"] == 0
+        assert tmp_db.get_digest_run(rid)["channel"] is None
+        tmp_db.finish_digest_run(
+            rid, picked_count=3, pushed=1, channel="wecom",
+            tokens_in=0, tokens_out=0, cost_usd=0.0, fallback_used=False,
+        )
+        row = tmp_db.get_digest_run(rid)
+        assert row["pushed"] == 1
+        assert row["channel"] == "wecom"
+        assert tmp_db.get_digest_run(9999) is None  # 不存在 → None
+
     def test_add_digest_items_unique(self, tmp_db):  # T-DB-07
         rid = tmp_db.start_digest_run("2026-08-27", candidate_count=3)
         picks = [Pick(article_id=i, rank=i, reason=f"理由{i}") for i in (1, 2, 3)]
