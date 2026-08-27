@@ -62,3 +62,4 @@ class ScoredArticle:
 
     article: Article
     score: float
+    article_id: int | None = None  # DB 主键：LLM 候选 JSON 与降级 Pick 回指文章用（开发文档 §3，M2 修订）
