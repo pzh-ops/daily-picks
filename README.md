@@ -127,9 +127,23 @@ LLM 参数（模型默认 `deepseek-v4-pro`）、兴趣关键词权重、推送�
 | `WECOM_WEBHOOK_KEY` | 企业微信机器人 webhook key（推送渠道二选一） | 选填 |
 | `SERVERCHAN_SENDKEY` | Server酱 SendKey（推送渠道二选一） | 选填 |
 
-## Demo 截图
+## 真实运行效果
 
-> 待补充：配置真实 webhook key 后，在此补充真实截图——微信收到的推送效果、`stats` 成本报表。
+**微信推送**（企业微信机器人，2026-08-27 首次真实推送）：
+
+```
+📌 今日精选 · 2026-08-27
+1. 【知乎】Qwen3.8-Flash新架构模型，训练成本降9成… —— 大模型新架构
+2. 【InfoQ】535B 大模型"直播"训练三个月，吴恩达公开力挺…
+3. 【InfoQ】大模型推理加速全链路：内存管理、编译优化…
+4. 【知乎】怎么看一周 70 万亿 Token的 GLM 5.3 Flash…
+5. 【InfoQ】DeepSeek 开源 Harness：AI 智能体基础设施开始"拆分"…
+…
+推送成功（wecom）: errcode=0 ok ｜ 单次成本 ¥0.09
+```
+
+- 采集 6 源 133 条 → 去重 → 规则打分 40 候选 → LLM 精排 10 条 → 微信推送，全流程真实可用。
+- `logs/last_digest.md` 保存每次 dry-run 预览；`daily-picks stats` 查看历史成本。
 
 ## 开发
 
