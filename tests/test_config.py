@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 import yaml
 
-from daily_picks.config import ConfigError, RootConfig, load_config, write_default_config
+from daily_picks.config import ConfigError, LLMConfig, RootConfig, load_config, write_default_config
 
 
 class TestConfig:
@@ -46,6 +47,72 @@ class TestConfig:
             cfg = load_config(str(path))
         assert cfg.sources.enabled == ["rss", "foo"]
         assert "foo" in caplog.text
+
+    def test_api_key_missing_raises(self, monkeypatch):  # T-CFG-06
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        with pytest.raises(ConfigError):
+            _ = LLMConfig().api_key
+
+    def test_api_key_from_env(self, monkeypatch):  # T-CFG-06 补充
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        assert LLMConfig().api_key == "sk-test"
+
+    def test_keyword_weight_out_of_range(self, tmp_path):  # T-CFG-08
+        path = tmp_path / "bad.yaml"
+        path.write_text("interests:\n  keywords:\n    - {keyword: AI, weight: 100}\n", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_config(str(path))
+
+    # ---- 补充用例（提升 config.py 分支覆盖）----
+
+    def test_dotenv_loaded_and_existing_env_wins(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("DP_DOTENV_KEY=from_dotenv\n", encoding="utf-8")
+        monkeypatch.setenv("DP_DOTENV_KEY", "existing")
+        with pytest.raises(ConfigError):
+            load_config()  # config.yaml 不存在会报错，但 .env 先被加载
+        assert os.environ["DP_DOTENV_KEY"] == "existing"  # 已存在的环境变量优先
+
+    def test_dotenv_sets_missing_env(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("DP_DOTENV_KEY=from_dotenv\n", encoding="utf-8")
+        monkeypatch.delenv("DP_DOTENV_KEY", raising=False)
+        with pytest.raises(ConfigError):
+            load_config()
+        assert os.environ["DP_DOTENV_KEY"] == "from_dotenv"
+
+    def test_dotenv_skips_comments_and_blanks(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("# 注释行\n\nDP_SKIP_KEY=val\n", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_config()
+        assert os.environ["DP_SKIP_KEY"] == "val"
+
+    def test_unknown_source_section_warns(self, tmp_path, caplog):
+        path = tmp_path / "c.yaml"
+        path.write_text("sources:\n  foo:\n    weight: 1\n", encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger="daily_picks.config"):
+            cfg = load_config(str(path))
+        assert cfg.sources.enabled == []
+        assert "foo" in caplog.text
+
+    def test_type_validation_error(self, tmp_path):
+        path = tmp_path / "bad.yaml"
+        path.write_text("llm:\n  temperature: hot\n", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_config(str(path))
+
+    def test_broken_yaml(self, tmp_path):
+        path = tmp_path / "bad.yaml"
+        path.write_text("digest: [unclosed\n", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_config(str(path))
+
+    def test_top_level_not_mapping(self, tmp_path):
+        path = tmp_path / "bad.yaml"
+        path.write_text("- a\n- b\n", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_config(str(path))
 
     def test_write_default_config_roundtrip(self, tmp_path):  # T-CFG-07
         path = tmp_path / "config.yaml"

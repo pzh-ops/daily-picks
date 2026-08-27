@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Sample</title>
+  <item>
+    <title>AI 编程工具实战</title>
+    <link>https://example.com/post/1</link>
+    <description>&lt;p&gt;用 AI 写代码的十个技巧，亲测有效。&lt;/p&gt;</description>
+    <pubDate>Wed, 26 Aug 2026 08:00:00 GMT</pubDate>
+    <author>张三</author>
+    <guid>https://example.com/post/1</guid>
+  </item>
+  <item>
+    <title>前端性能优化指南</title>
+    <link>https://example.com/post/2</link>
+    <description>浏览器渲染原理与优化实践。</description>
+    <pubDate>Tue, 25 Aug 2026 08:00:00 GMT</pubDate>
+    <guid>https://example.com/post/2</guid>
+  </item>
+</channel></rss>
