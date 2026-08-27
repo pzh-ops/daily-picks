@@ -6,7 +6,7 @@
 > 最小可用的个人 Agent 范式：采集（Collect）→ 理解（Understand）→ 决策（Decide）→ 推送（Deliver），
 > 外加一个可学习的偏好反馈闭环。
 
-**当前进度**：M0 脚手架 ✅ · M1 采集层 ✅ · M2 排序与 LLM 精排 ✅ · **M3 简报与微信推送（进行中）** · M4 调度闭环 · M5 打磨开源
+**当前进度**：M0 脚手架 ✅ · M1 采集层 ✅ · M2 排序与 LLM 精排 ✅ · M3 简报与微信推送 ✅ · **M4 调度闭环（进行中）** · M5 打磨开源
 
 ## 功能特性
 
@@ -16,12 +16,12 @@
 | R-002 | 跨源去重（content_hash 唯一约束） | ✅ M0 |
 | R-003 | 规则打分：关键词权重 + 来源权重 + 时效加成 | ✅ M2 |
 | R-004 | LLM 精排（DeepSeek v4-pro，非法输出自动降级规则分） | ✅ M2 |
-| R-005 | 微信推送：企业微信机器人 / Server酱 二选一 | 🔨 M3 |
-| R-006 | 每日 08:00 调度，当日幂等不重复推送 | ⏳ M4 |
+| R-005 | 微信推送：企业微信机器人 / Server酱 二选一 | ✅ M3 |
+| R-006 | 每日 08:00 调度，当日幂等不重复推送 | 🔨 M4 |
 | R-007 | 偏好反馈：like/dislike 调整关键词权重 | ⏳ M4 |
 | R-008 | 统计报表：推送历史 / token / 成本 | ⏳ M4 |
-| R-009 | dry-run 预览（不推送，输出精选到控制台） | ✅ M1 |
-| R-010 | 自检命令：`test llm` / `test push` | ⏳ M4 |
+| R-009 | dry-run 预览（写 logs/last_digest.md，不推送） | ✅ M3 |
+| R-010 | 自检命令：`test llm` / `test push` | 🔨 M3（test push 完成，test llm 待 M4） |
 | R-011 | 日志落盘 + 轮转 | ✅ M0 |
 
 ## 真实精选效果（M2 实测，LLM 精排）
@@ -41,6 +41,22 @@
 ```
 
 单次运行成本约 ¥0.1（DeepSeek v4-pro，40 候选精排 10 条）。
+
+## 简报格式（M3 实测，dry-run 生成的 logs/last_digest.md）
+
+```
+📌 今日精选 · 2026-08-27
+
+1. 【掘金】GLM5.3Flash 我"忍"你很久，今天"曝光"你！
+   摘要：这几天忍着不发，可憋死我了！ 今天终于可以"曝光"它了！Ox 模型到底是谁，想必大家已经知道了。 没错，主角就是 GLM…
+   理由：GLM大模型新版本，与大模型兴趣高度相关。
+   作者：甲维斯 ｜ 链接：https://juejin.cn/post/7678324732161851442
+
+2. 【知乎】很多人有 「电子囤积癖」…（其余条目略）
+```
+
+推送时企业微信以 `msgtype=text` 原文发送（不支持链接渲染，URL 为纯文本）；Server酱自动把
+`链接：URL` 行转换为 `[链接](URL)` markdown。同日重复运行自动跳过推送（幂等）。
 
 ## 架构
 
@@ -84,8 +100,9 @@ uv sync                                  # 安装依赖
 cp .env.example .env                     # 填入 DEEPSEEK_API_KEY（推送 key 可选）
 uv run daily-picks init                  # 生成 config.yaml + 初始化 SQLite（5 张表）
 
-uv run daily-picks run --dry-run         # 预览今日精选（控制台输出，不推送）
-uv run daily-picks test llm              # LLM 连通性自检
+uv run daily-picks run --dry-run         # 预览今日精选（写 logs/last_digest.md，不推送）
+uv run daily-picks test push             # 推送连通性自检（发一条测试消息）
+uv run daily-picks test llm              # LLM 连通性自检（M4 提供）
 uv run daily-picks run                   # 立即完整执行（采集→排序→推送）
 ```
 
@@ -109,12 +126,12 @@ LLM 参数（模型默认 `deepseek-v4-pro`）、兴趣关键词权重、推送�
 
 ## Demo 截图
 
-> 待补充：M3 推送功能完成后，在此补充真实截图——微信收到的推送效果、`stats` 成本报表。
+> 待补充：配置真实 webhook key 后，在此补充真实截图——微信收到的推送效果、`stats` 成本报表。
 
 ## 开发
 
 ```bash
-uv run pytest          # 全量测试（111 例，覆盖率 98.5%）
+uv run pytest          # 全量测试（154 例，覆盖率 97.7%）
 uv run ruff check .    # Lint
 ```
 
