@@ -193,3 +193,53 @@ class TestFactory:
         monkeypatch.setenv("MY_KEY", "custom")
         pub = create_publisher(PushConfig(provider="wecom", wecom_webhook_key_env="MY_KEY"))
         assert pub.key == "custom"
+
+
+class TestSplitBlocks:
+    """T-PUSH-10/11：按条目分组拆分（设计文档 §9.1，修复 2048 截断丢条目问题）。"""
+
+    # T-PUSH-10：标题 + 6 条长条目 → 拆 2 块，块首为条目开头、无半条
+    def test_split_digest_blocks_boundary(self):
+        from daily_picks.digest import split_digest_blocks
+
+        lines = ["📌 今日精选 · 2026-08-27"]
+        for i in range(1, 7):
+            lines.append(f"{i}. 【掘金】第 {i} 条标题" + "很长的摘要内容" * 30)
+            lines.append(f"   链接：https://example.com/{i}")
+        text = "\n".join(lines)
+        blocks = split_digest_blocks(text, 2048)
+        assert len(blocks) >= 2
+        for b in blocks:
+            assert len(b.encode("utf-8")) <= 2048
+        # 第一块首行是标题；各块首行以 "N. " 开头（条目边界，无半条）
+        assert blocks[0].startswith("📌")
+        for b in blocks[1:]:
+            assert b.splitlines()[0].startswith(("1. ", "2. ", "3. ", "4. ", "5. ", "6. "))
+
+    # T-PUSH-11：单行超长（无换行可切）→ truncate 兜底，不抛异常
+    def test_single_line_oversized_fallback(self):
+        from daily_picks.digest import split_digest_blocks
+
+        text = "中" * 3000  # 9000 字节单行
+        blocks = split_digest_blocks(text, 2048)
+        assert blocks
+        assert len(blocks[0].encode("utf-8")) <= 2048
+
+    # T-PUSH-04 新语义：多条目 3KB → 2 次请求、每块 ≤2048、内容完整（无截断半条）
+    async def test_long_digest_sent_in_blocks(self, mock_http):
+        route = mock_http.post(WECOM_URL).mock(
+            return_value=httpx.Response(200, json=load_fixture("wecom_ok.json"))
+        )
+        lines = ["📌 今日精选 · 2026-08-27"]
+        for i in range(1, 9):
+            lines.append(f"{i}. 【掘金】第 {i} 条" + "长摘要内容" * 40)
+            lines.append(f"   链接：https://example.com/{i}")
+        content = "\n".join(lines)  # 远超 2048 字节
+        result = await WecomPublisher("test-key").push("t", content)
+        assert result.ok
+        assert result.detail.startswith("sent=") and "blocks" in result.detail
+        assert route.call_count >= 2
+        assert route.call_count == int(result.detail.split("=")[1].split(" ")[0])
+        for call in route.calls:
+            sent = json.loads(call.request.content)["text"]["content"]
+            assert len(sent.encode("utf-8")) <= 2048

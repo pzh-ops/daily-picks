@@ -30,6 +30,34 @@ def truncate(s: str | None, n: int = SUMMARY_MAX_CHARS) -> str:
     return s[:n] + "…"
 
 
+def split_digest_blocks(text: str, max_bytes: int = WECOM_MAX_BYTES) -> list[str]:
+    """按完整条目分组拆分：以行首 'N. ' 为条目边界，逐行累计 UTF-8 字节，
+    超 max_bytes 时另起一块；标题行并入第一块。保证每条消息条目完整（不切断半条）。"""
+    if len(text.encode("utf-8")) <= max_bytes:
+        return [text]
+    lines = text.splitlines()
+    blocks: list[str] = []
+    cur: list[str] = []
+    cur_bytes = 0
+    for line in lines:
+        line_bytes = len(line.encode("utf-8")) + 1  # +1 换行符
+        if line_bytes > max_bytes:
+            # 单行本身超限（无换行可切）：先 flush 当前块，再对该行 UTF-8 安全截断兜底
+            if cur:
+                blocks.append("\n".join(cur))
+                cur, cur_bytes = [], 0
+            blocks.append(truncate_bytes(line, max_bytes))
+            continue
+        if cur and cur_bytes + line_bytes > max_bytes:
+            blocks.append("\n".join(cur))
+            cur, cur_bytes = [], 0
+        cur.append(line)
+        cur_bytes += line_bytes
+    if cur:
+        blocks.append("\n".join(cur))
+    return blocks or [""]
+
+
 def truncate_bytes(s: str, n: int = WECOM_MAX_BYTES) -> str:
     """UTF-8 安全截断到 n 字节：不切断多字节字符，截断后追加 '…' 且总字节数仍 ≤ n。"""
     if len(s.encode("utf-8")) <= n:

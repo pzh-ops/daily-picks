@@ -12,7 +12,7 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from daily_picks.config import PushConfig
-from daily_picks.digest import WECOM_MAX_BYTES, truncate_bytes
+from daily_picks.digest import WECOM_MAX_BYTES, split_digest_blocks
 from daily_picks.models import PushResult
 
 logger = logging.getLogger("daily_picks.publisher")
@@ -64,8 +64,21 @@ class WecomPublisher(Publisher):
                 ok=False, channel="wecom",
                 detail=f"未配置 {self.env_name}，请在 .env 或 shell 环境中设置后重试",
             )
-        if len(content.encode("utf-8")) > WECOM_MAX_BYTES:
-            content = truncate_bytes(content, WECOM_MAX_BYTES)
+        # 超长时按完整条目分组拆分逐条发送（不截断半条，设计文档 §9.1）
+        blocks = (
+            split_digest_blocks(content, WECOM_MAX_BYTES)
+            if len(content.encode("utf-8")) > WECOM_MAX_BYTES
+            else [content]
+        )
+        for i, block in enumerate(blocks, start=1):
+            result = await self._send_block(block)
+            if not result.ok:
+                result.detail = f"{result.detail}（第 {i}/{len(blocks)} 块发送失败）"
+                return result
+        return PushResult(ok=True, channel="wecom", detail=f"sent={len(blocks)} blocks, errcode=0")
+
+    async def _send_block(self, content: str) -> PushResult:
+        """发送单个内容块（≤WECOM_MAX_BYTES）。"""
         url = f"{WECOM_WEBHOOK_URL}?key={self.key}"
         body = {"msgtype": "text", "text": {"content": content}}
         try:
