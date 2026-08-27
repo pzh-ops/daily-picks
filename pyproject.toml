@@ -1,0 +1,54 @@
+[project]
+name = "daily-picks"
+version = "0.1.0"
+description = "每天自动聚合 B站/知乎/掘金/HN/InfoQ/RSS，LLM 精选后推送微信的个人 Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "apscheduler>=3.11.3",
+    "beautifulsoup4>=4.15.0",
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "lxml>=6.1.2",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6.0.3",
+    "tenacity>=9.1.4",
+]
+
+[dependency-groups]
+dev = [
+    "freezegun>=1.5.5",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.4",
+]
+
+[project.scripts]
+daily-picks = "daily_picks.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+# 项目约定（开发文档 §6）：所有时间统一本地时区、入库前 datetime 不带 tzinfo，因此忽略 DTZ 系列
+ignore = ["DTZ"]
+
+[tool.coverage.run]
+source = ["daily_picks"]
+omit = ["daily_picks/cli.py", "daily_picks/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 85
