@@ -171,6 +171,17 @@ class Storage:
                 self._conn.rollback()
                 raise StorageError(f"创建 digest_run 失败: {e}") from e
 
+    def get_digest_run(self, run_id: int) -> dict | None:
+        """读单条 digest_run（全部列）；不存在返回 None。"""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT * FROM digest_runs WHERE id=?", (run_id,)
+                ).fetchone()
+            except sqlite3.Error as e:
+                raise StorageError(f"读取 digest_run 失败: {e}") from e
+        return dict(row) if row is not None else None
+
     def finish_digest_run(self, run_id: int, *, picked_count: int, pushed: int,
                           channel: str | None, tokens_in: int, tokens_out: int,
                           cost_usd: float, fallback_used: bool) -> None:
