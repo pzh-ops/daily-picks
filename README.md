@@ -1,12 +1,30 @@
 # DailyPicks（今日精选）
 
+[![CI](https://github.com/pzh-ops/daily-picks/actions/workflows/ci.yml/badge.svg)](https://github.com/pzh-ops/daily-picks/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+
 每天自动从 **B站 / 知乎 / 掘金 / Hacker News / InfoQ / RSS** 聚合候选内容，用 LLM 按个人兴趣
 筛选排序、去重，生成"每日精选"简报并推送到微信的个人 Agent。
 
 > 最小可用的个人 Agent 范式：采集（Collect）→ 理解（Understand）→ 决策（Decide）→ 推送（Deliver），
 > 外加一个可学习的偏好反馈闭环。
 
-**当前进度**：M0 脚手架 ✅ · M1 采集层 ✅ · M2 排序与 LLM 精排 ✅ · M3 简报与微信推送 ✅ · M4 调度闭环 ✅ · **M5 打磨开源（进行中）**
+**当前进度**：M0 脚手架 ✅ · M1 采集层 ✅ · M2 排序与 LLM 精排 ✅ · M3 简报与微信推送 ✅ · M4 调度闭环 ✅ · M5 打磨开源 ✅
+
+## 目录
+
+- [功能特性](#功能特性)
+- [真实精选效果](#真实精选效果)
+- [简报格式](#简报格式)
+- [架构](#架构)
+- [工作原理](#工作原理)
+- [快速开始](#快速开始)
+- [配置说明](#配置说明)
+- [真实运行效果](#真实运行效果)
+- [开发](#开发)
+- [贡献](#贡献)
+- [许可证](#许可证)
 
 ## 功能特性
 
@@ -24,7 +42,9 @@
 | R-010 | 自检命令：`test llm` / `test push` | ✅ M4 |
 | R-011 | 日志落盘 + 轮转 | ✅ M0 |
 
-## 真实精选效果（M2 实测，LLM 精排）
+## 真实精选效果
+
+以下为 M2 实测、LLM 精排输出的真实结果：
 
 ```
 精选 10 条
@@ -42,7 +62,9 @@
 
 单次运行成本约 ¥0.1（DeepSeek v4-pro，40 候选精排 10 条）。
 
-## 简报格式（M3 实测，dry-run 生成的 logs/last_digest.md）
+## 简报格式
+
+以下为 M3 实测、dry-run 生成的 logs/last_digest.md 内容：
 
 ```
 📌 今日精选 · 2026-08-27
@@ -88,6 +110,11 @@
 │  └────────────────────────────────────────────────────────────────────────────┘             │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## 工作原理
+
+每日 08:00（Asia/Shanghai）触发：并发采集 6 源 → 去重入库 → 规则打分取 ≤40 候选 → DeepSeek
+精排 Top 10（失败自动降级为规则分）→ 生成简报 → 推送微信；当日幂等，重复运行不重复推送。
 
 ## 快速开始
 
@@ -148,8 +175,20 @@ LLM 参数（模型默认 `deepseek-v4-pro`）、兴趣关键词权重、推送�
 ## 开发
 
 ```bash
-uv run pytest          # 全量测试（197 例，覆盖率 97.8%）
+uv run pytest          # 全量测试（200 例，覆盖率 97.7%）
 uv run ruff check .    # Lint
 ```
 
 详见 `docs/`（设计/开发/测试文档）与 `AGENTS.md`。
+
+## 贡献
+
+欢迎提交 issue 与 PR：
+
+1. 提 issue：bug 报告、内容源失效、功能建议均可
+2. 开发流程：Fork → 新建分支 → 修改 → `uv run pytest` + `uv run ruff check .` 全绿后提 PR 到 `main`
+3. 新功能请补测试；测试禁止真实网络请求（HTTP 一律 respx mock），详见 `docs/03-测试文档.md`
+
+## 许可证
+
+[MIT](./LICENSE) © 2026 peterzhang176@gmail.com
