@@ -1,0 +1,77 @@
+# DailyPicks 示例配置 —— 复制为 config.yaml 后按需修改
+# 完整字段说明见 docs/01-设计文档.md §11
+
+app:
+  name: daily-picks
+  timezone: Asia/Shanghai
+
+schedule:
+  time: "08:00"              # 每日推送时间（24h）
+
+digest:
+  top_n: 10                  # 精选条数
+  max_candidates: 40         # 送 LLM 精排的候选上限
+  min_score: 0.0
+
+llm:
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-pro
+  api_key_env: DEEPSEEK_API_KEY
+  temperature: 0.3
+  max_tokens: 2000
+  timeout_s: 60
+  max_input_chars: 12000
+
+interests:
+  keywords:
+    - {keyword: "AI", weight: 2.0}
+    - {keyword: "大模型", weight: 2.0}
+    - {keyword: "独立开发", weight: 1.5}
+    - {keyword: "开源", weight: 1.0}
+
+sources:
+  enabled: [rss, bilibili, zhihu, juejin, hnews, infoq]
+  rss:
+    urls:
+      - https://sspai.com/feed
+      - https://www.ruanyifeng.com/blog/atom.xml
+    max_items_per_source: 30
+    weight: 0.0
+  bilibili:
+    ps: 20
+    max_items_per_source: 20
+    weight: 0.0
+  zhihu:
+    limit: 50
+    max_items_per_source: 30
+    weight: 0.0
+  juejin:
+    limit: 20
+    max_items_per_source: 20
+    weight: 0.0
+  hnews:
+    hits_per_page: 30
+    max_items_per_source: 30
+    weight: 0.0
+  infoq:
+    urls:
+      - https://www.infoq.cn/feed
+    max_items_per_source: 20
+    weight: 0.0
+
+push:
+  provider: wecom            # wecom | serverchan | none
+  wecom:
+    webhook_key_env: WECOM_WEBHOOK_KEY
+  serverchan:
+    sendkey_env: SERVERCHAN_SENDKEY
+  dry_run_file: logs/last_digest.md
+
+storage:
+  db_path: data/daily_picks.db
+
+logging:
+  level: INFO
+  file: logs/daily_picks.log
+  max_bytes: 1048576
+  backup_count: 3
