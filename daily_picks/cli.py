@@ -14,8 +14,10 @@ import httpx
 
 from daily_picks import __version__
 from daily_picks.config import DEFAULT_CONFIG_PATH, ConfigError, RootConfig, load_config, write_default_config
+from daily_picks.llm import LLMClient, estimate_cost
 from daily_picks.log import setup_logging
-from daily_picks.models import Article
+from daily_picks.models import Article, ScoredArticle
+from daily_picks.ranker import rank_and_pick, rule_score, select_candidates
 from daily_picks.sources import SourceAdapter, build_adapters
 from daily_picks.storage import Storage
 
@@ -104,9 +106,28 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """run 子命令：立即执行一次完整流程（M1：采集→去重入库→统计输出）。"""
+    """run 子命令：立即执行一次完整流程（M2：采集→去重入库→规则打分→LLM 精排/降级→打印精选）。"""
     cfg = load_config(DEFAULT_CONFIG_PATH)
     return asyncio.run(run_once(cfg, dry_run=args.dry_run))
+
+
+def _parse_row_datetime(value: str | None) -> datetime | None:
+    """SQLite DATETIME 文本 → naive datetime；None/非法 → None。"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _llm_key_missing(cfg: RootConfig) -> bool:
+    """DEEPSEEK_API_KEY 是否缺失（缺失 → 走规则分降级，run 不崩溃）。"""
+    try:
+        _key = cfg.llm.api_key
+        return _key == ""
+    except ConfigError:
+        return True
 
 
 async def _fetch_one(adapter: SourceAdapter, cfg: RootConfig,
@@ -160,7 +181,8 @@ async def _collect(adapters: list[SourceAdapter],
 async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
     """完整流程（设计文档 §4.2 数据流）。返回 0=成功/推送，1=部分失败，2=致命错误。
 
-    M1 已实现步骤 1-5；步骤 6-10（LLM 精排→digest→推送→记账）由 M2/M3 填充。
+    M1 已实现步骤 1-5；M2 实现步骤 6-7（规则打分→LLM 精排/降级→打印精选）与排序记账；
+    步骤 8-9（digest 生成与推送）由 M3 填充。
     """
     # 步骤 1：日志 + Storage 初始化（建表/迁移）
     setup_logging(level=cfg.logging.level, log_file=cfg.logging.file,
@@ -190,13 +212,56 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
     logger.info("采集 %d 条，去重后新入库 %d 条 run_id=%s", len(collected), len(new_ids), run_id)
     failed = [name for name, (ok, _) in stats.items() if not ok]
 
-    # 步骤 6：weights = storage.get_interest_weights() 合并 config 关键词（config 优先）——M2 填充
-    # 步骤 7：candidates = select_candidates(...)；rank_and_pick(...)——M2 填充
-    # 步骤 8：digest_text = build_digest_text(...)——M3 填充
-    # 步骤 9：dry_run 写 logs/last_digest.md；否则 publisher.push()——M3 填充
-    # 步骤 10：finish_digest_run(...) 记账（token/cost/fallback）；输出摘要日志——M3 填充
-    print("LLM 精排将在 M2 实现")
-    logger.info("LLM 精排将在 M2 实现（M1 截止到采集与去重入库）")
+    # 步骤 6：weights = storage.get_interest_weights() 合并 config 关键词
+    # （语义：config.interests.keywords 优先，同名词以 config 权重为准；表中独有的词追加）
+    weights = storage.get_interest_weights()
+    for kw in cfg.interests.keywords:
+        weights[kw.keyword] = kw.weight
+
+    # 步骤 7：规则打分 → select_candidates → rank_and_pick（LLM 失败/无 key 降级为规则分）
+    now = datetime.now()
+    scored: list[ScoredArticle] = []
+    for row in storage.get_articles_by_ids(new_ids):
+        article = Article(
+            source=row["source"], source_key=row["source_key"], title=row["title"], url=row["url"],
+            author=row["author"], summary=row["summary"],
+            published_at=_parse_row_datetime(row["published_at"]),
+        )
+        feedback = storage.get_feedback_kinds(row["id"])
+        score = rule_score(article, weights, now,
+                           source_weight=getattr(cfg.sources, article.source).weight,
+                           feedback_kinds=feedback)
+        storage.update_score(row["id"], score)
+        scored.append(ScoredArticle(article=article, score=score, article_id=row["id"]))
+
+    candidates = select_candidates(scored, cfg.digest.max_candidates)
+    llm_client = LLMClient(cfg.llm)
+    if _llm_key_missing(cfg):
+        print("未配置 DEEPSEEK_API_KEY，使用规则分降级")
+        logger.warning("未配置 DEEPSEEK_API_KEY，使用规则分降级")
+    picks, fallback_used = await rank_and_pick(
+        candidates, llm_client, weights, cfg.digest.top_n, cfg.llm.max_input_chars
+    )
+
+    by_id = {sa.article_id: sa for sa in scored}
+    print(f"精选 {len(picks)} 条" + (" [fallback]" if fallback_used else ""))
+    for pick in picks:
+        picked = by_id.get(pick.article_id)
+        if picked is None:
+            logger.warning("精选条目无对应文章 article_id=%s，跳过", pick.article_id)
+            continue
+        print(f"{pick.rank}. 【{picked.article.source}】{picked.article.title} —— {pick.reason}")
+
+    # 步骤 10（排序部分，M2）：finish_digest_run 记账（token/cost/fallback；推送字段由 M3 填充）
+    tokens_in = llm_client.last_tokens_in
+    tokens_out = llm_client.last_tokens_out
+    cost_usd = estimate_cost(tokens_in, tokens_out)
+    storage.finish_digest_run(run_id, picked_count=len(picks), pushed=0, channel=None,
+                              tokens_in=tokens_in, tokens_out=tokens_out,
+                              cost_usd=cost_usd, fallback_used=fallback_used)
+    logger.info("采集 %d 条，去重后新入库 %d 条，候选 %d，精选 %d，成本 $%.6f run_id=%s",
+                len(collected), len(new_ids), len(candidates), len(picks), cost_usd, run_id)
+    # 步骤 8-9：digest 生成与推送（M3 填充）
 
     # 全部源失败视为部分失败（对齐 T-E2E-06）；单源失败不影响整体（R-001）
     return 1 if (stats and failed and len(failed) == len(stats)) else 0
