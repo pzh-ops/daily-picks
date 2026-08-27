@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -15,17 +16,22 @@ import httpx
 from daily_picks import __version__
 from daily_picks.config import DEFAULT_CONFIG_PATH, ConfigError, RootConfig, load_config, write_default_config
 from daily_picks.digest import build_digest_text
+from daily_picks.feedback import FeedbackError, apply_feedback
 from daily_picks.llm import LLMClient, estimate_cost
 from daily_picks.log import setup_logging
 from daily_picks.models import Article, PushResult, ScoredArticle
 from daily_picks.publisher import NoopPublisher, create_publisher
 from daily_picks.ranker import rank_and_pick, rule_score, select_candidates
+from daily_picks.scheduler import run_forever
 from daily_picks.sources import SourceAdapter, build_adapters
 from daily_picks.storage import Storage
 
 logger = logging.getLogger("daily_picks.cli")
 
 _ENV_EXAMPLE = "DEEPSEEK_API_KEY=\nWECOM_WEBHOOK_KEY=\nSERVERCHAN_SENDKEY=\n"
+
+# stats 成本估算汇率（任务要求：USD → CNY 按 1 USD = 7.2 CNY）
+USD_TO_CNY = 7.2
 
 # 单源采集超时（秒）。模块级常量便于测试注入（T-SRC-ALL-02 monkeypatch 缩短），见开发文档 §4.18 步骤 4
 SOURCE_TIMEOUT_S = 30.0
@@ -62,9 +68,61 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _not_implemented(command: str) -> int:
-    """M0 阶段未实现命令的统一占位：提示并返回 0。"""
-    print(f"命令 `{command}` 尚未实现（后续里程碑完成）。")
+def _open_storage(cfg: RootConfig) -> Storage:
+    """按配置打开 Storage 并建表（db 父目录不存在时自动创建，目录结构 §2）。"""
+    db_path = Path(cfg.storage.db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    storage = Storage(db_path)
+    storage.init_schema()
+    return storage
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    """serve 子命令：常驻调度（setup_logging → run_forever 打印下次运行时间并阻塞；Ctrl+C 优雅退出）。"""
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    setup_logging(level=cfg.logging.level, log_file=cfg.logging.file,
+                  max_bytes=cfg.logging.max_bytes, backup_count=cfg.logging.backup_count)
+    run_forever(cfg)
+    return 0
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """feedback 子命令：like|dislike <article_id> [--keyword]（设计文档 §10）。
+
+    找不到文章 → 退出码 1 + 提示；成功打印更新了哪些关键词权重。
+    """
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    storage = _open_storage(cfg)
+    try:
+        result = apply_feedback(storage, args.article_id, args.kind, extra_keyword=args.keyword)
+    except FeedbackError as e:
+        print(f"反馈失败: {e}", file=sys.stderr)
+        return 1
+    print(f"反馈已记录（{args.kind}）")
+    if result["updated"]:
+        print(f"已更新关键词权重: {', '.join(result['updated'])}")
+    else:
+        print("文章未命中任何关键词，权重未变化（like 可加 --keyword 指定附加关键词）")
+    print(f"文章 {args.article_id} 状态: {result['article_state']}")
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """stats 子命令：近 N 天统计报表（运行/推送/token/成本，设计文档 R-008）。"""
+    if args.days < 1:
+        print(f"--days 必须 >= 1（实际为 {args.days}）", file=sys.stderr)
+        return 1
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    storage = _open_storage(cfg)
+    stats = storage.get_stats(args.days)
+    cost_usd = float(stats["cost_usd"])
+    print(f"近 {args.days} 天统计")
+    print(f"  运行次数:   {stats['runs']}")
+    print(f"  推送次数:   {stats['pushed']}")
+    print(f"  Token 输入: {stats['tokens_in']}")
+    print(f"  Token 输出: {stats['tokens_out']}")
+    print(f"  成本(USD):  ${cost_usd:.6f}")
+    print(f"  成本(CNY):  ¥{cost_usd * USD_TO_CNY:.4f}（按 1 USD = {USD_TO_CNY:g} CNY 估算）")
     return 0
 
 
@@ -147,11 +205,49 @@ async def _test_push(cfg: RootConfig) -> int:
     return 1
 
 
+async def _test_llm(cfg: RootConfig) -> int:
+    """test llm：发送一条极简 chat 请求（"ping"）验证 DeepSeek 连通与 key 有效性（设计文档 R-010）。
+
+    成功打印模型名与延迟；失败（无 key / HTTP 错误 / 超时 / 非 JSON 响应）退出码 1。
+    """
+    try:
+        api_key = cfg.llm.api_key
+    except ConfigError:
+        print(f"未配置 {cfg.llm.api_key_env}，无法自检 LLM 连通性", file=sys.stderr)
+        return 1
+    url = f"{cfg.llm.base_url.rstrip('/')}/chat/completions"
+    body = {
+        "model": cfg.llm.model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "stream": False,
+    }
+    try:
+        client = httpx.AsyncClient(timeout=cfg.llm.timeout_s)
+    except ImportError as e:
+        # 环境代理不可用（如 socks5 代理但未装 socksio）：降级为直连（对齐 _collect 的处理）
+        logger.warning("httpx 初始化失败（环境代理配置不可用），改用直连: %s", e)
+        client = httpx.AsyncClient(timeout=cfg.llm.timeout_s, trust_env=False)
+    started = time.perf_counter()
+    try:
+        async with client:
+            resp = await client.post(url, json=body, headers={"Authorization": f"Bearer {api_key}"})
+            resp.raise_for_status()
+            data = resp.json()
+    except (httpx.HTTPError, ValueError) as e:
+        print(f"LLM 自检失败: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    model = data.get("model") if isinstance(data, dict) else None
+    print(f"LLM OK：model={model or cfg.llm.model}，延迟 {elapsed_ms:.0f} ms")
+    return 0
+
+
 def cmd_test(args: argparse.Namespace) -> int:
-    """test 子命令：llm/push 连通性自检（设计文档 R-010；test llm 由 M4 完成）。"""
-    if args.target == "llm":
-        return _not_implemented("test llm")
+    """test 子命令：llm/push 连通性自检（设计文档 R-010）。"""
     cfg = load_config(DEFAULT_CONFIG_PATH)
+    if args.target == "llm":
+        return asyncio.run(_test_llm(cfg))
     return asyncio.run(_test_push(cfg))
 
 
@@ -345,9 +441,9 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "init": cmd_init,
         "run": cmd_run,
-        "serve": lambda _: _not_implemented("serve"),
-        "feedback": lambda _: _not_implemented("feedback"),
-        "stats": lambda _: _not_implemented("stats"),
+        "serve": cmd_serve,
+        "feedback": cmd_feedback,
+        "stats": cmd_stats,
         "test": cmd_test,
     }
     try:
