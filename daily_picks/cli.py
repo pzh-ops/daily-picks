@@ -14,9 +14,11 @@ import httpx
 
 from daily_picks import __version__
 from daily_picks.config import DEFAULT_CONFIG_PATH, ConfigError, RootConfig, load_config, write_default_config
+from daily_picks.digest import build_digest_text
 from daily_picks.llm import LLMClient, estimate_cost
 from daily_picks.log import setup_logging
-from daily_picks.models import Article, ScoredArticle
+from daily_picks.models import Article, PushResult, ScoredArticle
+from daily_picks.publisher import NoopPublisher, create_publisher
 from daily_picks.ranker import rank_and_pick, rule_score, select_candidates
 from daily_picks.sources import SourceAdapter, build_adapters
 from daily_picks.storage import Storage
@@ -130,6 +132,29 @@ def _llm_key_missing(cfg: RootConfig) -> bool:
         return True
 
 
+# test push 的固定测试消息（开发文档 §4.18）
+TEST_PUSH_MESSAGE = "这是一条 DailyPicks 测试消息：如果你在微信中收到它，说明推送配置正确。"
+
+
+async def _test_push(cfg: RootConfig) -> int:
+    """test push：向配置渠道发送固定测试消息并报告 PushResult；失败（含无 key）退出码 1。"""
+    publisher = create_publisher(cfg.push)
+    result = await publisher.push("今日精选测试", TEST_PUSH_MESSAGE)
+    if result.ok:
+        print(f"推送自检通过（channel={result.channel}）: {result.detail}")
+        return 0
+    print(f"推送自检失败（channel={result.channel}）: {result.detail}", file=sys.stderr)
+    return 1
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    """test 子命令：llm/push 连通性自检（设计文档 R-010；test llm 由 M4 完成）。"""
+    if args.target == "llm":
+        return _not_implemented("test llm")
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    return asyncio.run(_test_push(cfg))
+
+
 async def _fetch_one(adapter: SourceAdapter, cfg: RootConfig,
                      client: httpx.AsyncClient) -> tuple[str, list[Article] | None, str | None]:
     """单源采集：asyncio.wait_for 超时 + 全异常隔离；返回 (源名, 文章|None, 错误描述|None)。"""
@@ -181,8 +206,8 @@ async def _collect(adapters: list[SourceAdapter],
 async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
     """完整流程（设计文档 §4.2 数据流）。返回 0=成功/推送，1=部分失败，2=致命错误。
 
-    M1 已实现步骤 1-5；M2 实现步骤 6-7（规则打分→LLM 精排/降级→打印精选）与排序记账；
-    步骤 8-9（digest 生成与推送）由 M3 填充。
+    步骤 1-5 采集入库（M1）；步骤 6-7 打分与 LLM 精排（M2）；步骤 8-10 简报生成、
+    推送（含 dry-run 与同日幂等跳过）与记账（M3）。
     """
     # 步骤 1：日志 + Storage 初始化（建表/迁移）
     setup_logging(level=cfg.logging.level, log_file=cfg.logging.file,
@@ -252,19 +277,64 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
             continue
         print(f"{pick.rank}. 【{picked.article.source}】{picked.article.title} —— {pick.reason}")
 
-    # 步骤 10（排序部分，M2）：finish_digest_run 记账（token/cost/fallback；推送字段由 M3 填充）
+    # 步骤 8：生成微信 markdown 简报（设计文档 §8；items = (rank, article, reason)）
+    digest_items: list[tuple[int, Article, str]] = []
+    for pick in picks:
+        picked = by_id.get(pick.article_id)
+        if picked is None:
+            logger.warning("精选条目无对应文章 article_id=%s，跳过", pick.article_id)
+            continue
+        digest_items.append((pick.rank, picked.article, pick.reason))
+    digest_text = build_digest_text(digest_items, run_date)
+
+    # 步骤 9：推送。dry-run → NoopPublisher 写 dry_run_file；幂等：当日已推送则跳过 webhook（设计文档 §5）
+    prev_run = storage.get_digest_run(run_id)
+    already_pushed = bool(prev_run and prev_run["pushed"])
+    push_result: PushResult | None = None
+    pushed = 0
+    channel: str | None = None
+    if dry_run:
+        push_result = await NoopPublisher(cfg.push.dry_run_file).push("今日精选", digest_text)
+        logger.info("dry-run：简报已写入 %s", cfg.push.dry_run_file)
+        channel = prev_run["channel"] if already_pushed else "dry-run"
+        pushed = 1 if already_pushed else 0
+    elif already_pushed:
+        logger.info("当日已推送 run_id=%s channel=%s，跳过推送（幂等）", run_id, prev_run["channel"])
+        channel = prev_run["channel"]
+        pushed = 1
+    else:
+        push_result = await create_publisher(cfg.push).push("今日精选", digest_text)
+        channel = push_result.channel
+        if push_result.ok and channel in ("wecom", "serverchan"):
+            pushed = 1
+            logger.info("推送成功 channel=%s detail=%s", channel, push_result.detail)
+            print(f"推送成功（{channel}）: {push_result.detail}")
+        elif push_result.ok:
+            # provider=none：NoopPublisher 只写本地文件，等价 dry-run（设计文档 §9.3），不计 pushed
+            logger.info("推送渠道为 none，简报已写本地文件: %s", push_result.detail)
+            print(f"已写本地文件: {push_result.detail}")
+        else:
+            logger.error("推送失败 channel=%s detail=%s", channel, push_result.detail)
+            print(f"推送失败（{channel}）: {push_result.detail}", file=sys.stderr)
+
+    # 精选条目落库（设计文档 §4.2 步骤 7）
+    storage.add_digest_items(run_id, picks)
+
+    # 步骤 10：finish_digest_run 记账（picked/pushed/channel/token/cost/fallback）
     tokens_in = llm_client.last_tokens_in
     tokens_out = llm_client.last_tokens_out
     cost_usd = estimate_cost(tokens_in, tokens_out)
-    storage.finish_digest_run(run_id, picked_count=len(picks), pushed=0, channel=None,
+    storage.finish_digest_run(run_id, picked_count=len(picks), pushed=pushed, channel=channel,
                               tokens_in=tokens_in, tokens_out=tokens_out,
                               cost_usd=cost_usd, fallback_used=fallback_used)
     logger.info("采集 %d 条，去重后新入库 %d 条，候选 %d，精选 %d，成本 $%.6f run_id=%s",
                 len(collected), len(new_ids), len(candidates), len(picks), cost_usd, run_id)
-    # 步骤 8-9：digest 生成与推送（M3 填充）
 
-    # 全部源失败视为部分失败（对齐 T-E2E-06）；单源失败不影响整体（R-001）
-    return 1 if (stats and failed and len(failed) == len(stats)) else 0
+    # 全部源失败视为部分失败（对齐 T-E2E-06）；推送失败亦返回 1（T-E2E-05）；单源失败不影响整体（R-001）
+    exit_code = 1 if (stats and failed and len(failed) == len(stats)) else 0
+    if push_result is not None and not push_result.ok:
+        exit_code = 1
+    return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -278,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         "serve": lambda _: _not_implemented("serve"),
         "feedback": lambda _: _not_implemented("feedback"),
         "stats": lambda _: _not_implemented("stats"),
-        "test": lambda _: _not_implemented("test"),
+        "test": cmd_test,
     }
     try:
         return handlers[args.command](args)
