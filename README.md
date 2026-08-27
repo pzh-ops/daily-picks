@@ -6,7 +6,7 @@
 > 最小可用的个人 Agent 范式：采集（Collect）→ 理解（Understand）→ 决策（Decide）→ 推送（Deliver），
 > 外加一个可学习的偏好反馈闭环。
 
-**当前进度**：M0 脚手架 ✅ · M1 采集层 ✅ · M2 排序与 LLM 精排 ✅ · M3 简报与微信推送 ✅ · **M4 调度闭环（进行中）** · M5 打磨开源
+**当前进度**：M0 脚手架 ✅ · M1 采集层 ✅ · M2 排序与 LLM 精排 ✅ · M3 简报与微信推送 ✅ · M4 调度闭环 ✅ · **M5 打磨开源（进行中）**
 
 ## 功能特性
 
@@ -17,11 +17,11 @@
 | R-003 | 规则打分：关键词权重 + 来源权重 + 时效加成 | ✅ M2 |
 | R-004 | LLM 精排（DeepSeek v4-pro，非法输出自动降级规则分） | ✅ M2 |
 | R-005 | 微信推送：企业微信机器人 / Server酱 二选一 | ✅ M3 |
-| R-006 | 每日 08:00 调度，当日幂等不重复推送 | 🔨 M4 |
-| R-007 | 偏好反馈：like/dislike 调整关键词权重 | ⏳ M4 |
-| R-008 | 统计报表：推送历史 / token / 成本 | ⏳ M4 |
+| R-006 | 每日 08:00 调度，当日幂等不重复推送 | ✅ M4 |
+| R-007 | 偏好反馈：like/dislike 调整关键词权重 | ✅ M4 |
+| R-008 | 统计报表：推送历史 / token / 成本 | ✅ M4 |
 | R-009 | dry-run 预览（写 logs/last_digest.md，不推送） | ✅ M3 |
-| R-010 | 自检命令：`test llm` / `test push` | 🔨 M3（test push 完成，test llm 待 M4） |
+| R-010 | 自检命令：`test llm` / `test push` | ✅ M4 |
 | R-011 | 日志落盘 + 轮转 | ✅ M0 |
 
 ## 真实精选效果（M2 实测，LLM 精排）
@@ -102,8 +102,11 @@ uv run daily-picks init                  # 生成 config.yaml + 初始化 SQLite
 
 uv run daily-picks run --dry-run         # 预览今日精选（写 logs/last_digest.md，不推送）
 uv run daily-picks test push             # 推送连通性自检（发一条测试消息）
-uv run daily-picks test llm              # LLM 连通性自检（M4 提供）
+uv run daily-picks test llm              # LLM 连通性自检（验证 DeepSeek key 与延迟）
 uv run daily-picks run                   # 立即完整执行（采集→排序→推送）
+uv run daily-picks serve                 # 常驻调度：每天 08:00（Asia/Shanghai）自动执行
+uv run daily-picks feedback like 12      # 偏好反馈：like/dislike 调整关键词权重（可加 --keyword）
+uv run daily-picks stats --days 7        # 统计报表：运行/推送/token/成本（USD + CNY）
 ```
 
 ## 配置说明
@@ -131,7 +134,7 @@ LLM 参数（模型默认 `deepseek-v4-pro`）、兴趣关键词权重、推送�
 ## 开发
 
 ```bash
-uv run pytest          # 全量测试（154 例，覆盖率 97.7%）
+uv run pytest          # 全量测试（197 例，覆盖率 97.8%）
 uv run ruff check .    # Lint
 ```
 
