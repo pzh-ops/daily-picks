@@ -152,6 +152,10 @@ class LLMClient:
         result = self.parse_response(_extract_content(data), valid_ids=set(sent_ids), top_n=top_n)
         result.tokens_in = tokens_in
         result.tokens_out = tokens_out
+        if not result.ok:
+            # 诊断：校验失败时记录原始输出前 300 字，便于定位（如 thinking 耗尽 max_tokens 致 content 为空）
+            logger.warning("LLM 输出校验失败（tokens_in=%d tokens_out=%d），将降级为规则分。原始输出: %s",
+                           tokens_in, tokens_out, (result.raw_text or "")[:300])
         return result
 
     async def _chat(self, messages: list[dict], **kw) -> dict:

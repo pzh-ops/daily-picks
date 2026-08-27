@@ -18,7 +18,7 @@ llm:
   model: deepseek-v4-pro
   api_key_env: DEEPSEEK_API_KEY
   temperature: 0.3
-  max_tokens: 2000
+  max_tokens: 8000            # 思考模型需充足输出预算（2000 会被思维链耗尽致 JSON 为空）
   timeout_s: 60
   max_input_chars: 12000
 
