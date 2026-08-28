@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from daily_picks.cli import run_once
+from daily_picks.models import Article
 from daily_picks.storage import Storage
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -23,6 +24,9 @@ JUEJIN_URL = "https://api.juejin.cn/recommend_api/v1/article/recommend_all_feed"
 HN_URL = "https://hn.algolia.com/api/v1/search"
 INFOQ_URL = "https://www.infoq.cn/feed"
 WECOM_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
+TRACK_BASE = "https://track.example.workers.dev"
+LINKS_URL = f"{TRACK_BASE}/api/links"
+CLICKS_URL = f"{TRACK_BASE}/api/clicks"
 LLM_URL = "https://api.deepseek.com/chat/completions"
 
 
@@ -160,3 +164,76 @@ class TestRunOnce:
         run = get_run(e2e_cfg)
         assert run["pushed"] == 1  # 保持已推送状态
         assert run["channel"] == "wecom"
+
+
+class TestTrackingIntegration:
+    # T-E2E-08：tracking 全链路（dry-run）——点击回写权重 + 简报链接替换为短链 + 游标推进
+    async def test_tracking_full_flow(self, e2e_cfg, mock_http, frozen_now, monkeypatch, capsys):
+        monkeypatch.setenv("TRACKING_API_TOKEN", "test-token")
+        e2e_cfg.tracking.base_url = TRACK_BASE
+        # 预置一篇关键词命中的文章，让 worker 返回它的点击事件
+        # （db 父目录由 run_once 创建；此处先于 run_once 建库，需先行 mkdir，对齐 _open_storage）
+        Path(e2e_cfg.storage.db_path).parent.mkdir(parents=True, exist_ok=True)
+        storage = Storage(Path(e2e_cfg.storage.db_path))
+        storage.init_schema()
+        storage.bump_keyword_weight("AI", 0)  # AI = 1.0
+        pre_id = storage.upsert_articles([
+            Article(source="rss", source_key="pre-seed", title="AI 大事记",
+                    url="https://example.com/ai-post", summary="AI 领域今日进展")
+        ])[0]
+        mock_sources(mock_http)
+        mock_http.get(CLICKS_URL).mock(return_value=httpx.Response(200, json={
+            "clicks": [{"id": 1, "article_id": pre_id, "click_date": "2026-08-27", "count": 2}],
+            "has_more": False,
+        }))
+        mock_http.post(LINKS_URL).mock(return_value=httpx.Response(200, json={"ok": True}))
+        assert await run_once(e2e_cfg, dry_run=True) == 0
+        text = Path(e2e_cfg.push.dry_run_file).read_text(encoding="utf-8")
+        assert text.count("链接：") == 8                       # 简报 8 条（fixtures 新文章）
+        # 全部链接行都已替换为短链（预置文章已在库中、不进 new_ids，故不参与本次推送）
+        assert text.count(f"链接：{TRACK_BASE}/c/") == 8
+        storage2 = Storage(Path(e2e_cfg.storage.db_path))
+        assert storage2.get_click_cursor() == 1               # 游标已推进
+        assert storage2.get_interest_weights()["AI"] == pytest.approx(1.05)  # 点击回写 +0.05
+        assert storage2.count_clicks() == 1
+        out = capsys.readouterr().out
+        assert "点击同步" in out
+
+    # T-E2E-09：短链注册失败 → fail-open：简报保留原始 URL，run 仍返回 0
+    async def test_tracking_register_failure_keeps_original_urls(
+            self, e2e_cfg, mock_http, frozen_now, monkeypatch):
+        monkeypatch.setenv("TRACKING_API_TOKEN", "test-token")
+        e2e_cfg.tracking.base_url = TRACK_BASE
+        mock_sources(mock_http)
+        mock_http.get(CLICKS_URL).mock(
+            return_value=httpx.Response(200, json={"clicks": [], "has_more": False}))
+        mock_http.post(LINKS_URL).mock(return_value=httpx.Response(500))
+        assert await run_once(e2e_cfg, dry_run=True) == 0
+        text = Path(e2e_cfg.push.dry_run_file).read_text(encoding="utf-8")
+        assert "/c/" not in text
+        assert "链接：" in text
+
+    # T-E2E-10：点击同步失败 → fail-open：短链仍注册，run 仍返回 0，游标不动
+    async def test_tracking_sync_failure_still_pushes(
+            self, e2e_cfg, mock_http, frozen_now, monkeypatch):
+        monkeypatch.setenv("TRACKING_API_TOKEN", "test-token")
+        e2e_cfg.tracking.base_url = TRACK_BASE
+        mock_sources(mock_http)
+        mock_http.get(CLICKS_URL).mock(return_value=httpx.Response(500))
+        mock_http.post(LINKS_URL).mock(return_value=httpx.Response(200, json={"ok": True}))
+        assert await run_once(e2e_cfg, dry_run=True) == 0
+        text = Path(e2e_cfg.push.dry_run_file).read_text(encoding="utf-8")
+        assert "/c/" in text
+        assert Storage(Path(e2e_cfg.storage.db_path)).get_click_cursor() == 0
+
+    # T-E2E-11：tracking 关闭（base_url 空）→ 零追踪请求（v1 行为回归）
+    async def test_tracking_disabled_makes_no_requests(self, e2e_cfg, mock_http, frozen_now):
+        e2e_cfg.tracking.base_url = ""
+        mock_sources(mock_http)
+        links_route = mock_http.post(LINKS_URL).mock(
+            return_value=httpx.Response(200, json={"ok": True}))
+        clicks_route = mock_http.get(CLICKS_URL).mock(
+            return_value=httpx.Response(200, json={"clicks": [], "has_more": False}))
+        assert await run_once(e2e_cfg, dry_run=True) == 0
+        assert links_route.call_count == 0
+        assert clicks_route.call_count == 0

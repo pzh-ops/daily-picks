@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import logging
+import os
 import sys
 import time
 from datetime import datetime
@@ -25,10 +27,11 @@ from daily_picks.ranker import rank_and_pick, rule_score, select_candidates
 from daily_picks.scheduler import run_forever
 from daily_picks.sources import SourceAdapter, build_adapters
 from daily_picks.storage import Storage
+from daily_picks.tracking import TrackingClient, TrackingError, sync_clicks
 
 logger = logging.getLogger("daily_picks.cli")
 
-_ENV_EXAMPLE = "DEEPSEEK_API_KEY=\nWECOM_WEBHOOK_KEY=\nSERVERCHAN_SENDKEY=\n"
+_ENV_EXAMPLE = "DEEPSEEK_API_KEY=\nWECOM_WEBHOOK_KEY=\nSERVERCHAN_SENDKEY=\nTRACKING_API_TOKEN=\n"
 
 # stats 成本估算汇率（任务要求：USD → CNY 按 1 USD = 7.2 CNY）
 USD_TO_CNY = 7.2
@@ -75,6 +78,19 @@ def _open_storage(cfg: RootConfig) -> Storage:
     storage = Storage(db_path)
     storage.init_schema()
     return storage
+
+
+def _make_tracking_client(cfg: RootConfig) -> TrackingClient | None:
+    """构造点击追踪客户端（设计文档 §15）。base_url 空 → None（功能关闭）；
+    base_url 已配置但缺 API token → WARNING + None（fail-open，不阻塞主流程）。"""
+    if not cfg.tracking.enabled:
+        return None
+    token = os.environ.get(cfg.tracking.api_key_env, "").strip()
+    if not token:
+        logger.warning("tracking.base_url 已配置但未设置 %s，本次跳过点击同步与短链注册",
+                       cfg.tracking.api_key_env)
+        return None
+    return TrackingClient(cfg.tracking.base_url, token, timeout_s=cfg.tracking.timeout_s)
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -155,8 +171,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     Storage(db_path).init_schema()
     print(
-        f"已初始化数据库: {db_path}（articles / digest_runs / digest_items /"
-        " feedback / interest_weights 共 5 张表）"
+        f"已初始化数据库: {db_path}（articles / digest_runs / digest_items / feedback /"
+        " interest_weights / clicks / meta 共 7 张表）"
     )
     print("\n下一步：")
     print("  1. 编辑 .env 填入密钥（DEEPSEEK_API_KEY；推送选配 WECOM_WEBHOOK_KEY 或 SERVERCHAN_SENDKEY）")
@@ -313,6 +329,9 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
     storage = Storage(db_path)
     storage.init_schema()
 
+    # 点击追踪客户端（未配置 → None；设计文档 §15）
+    track_client = _make_tracking_client(cfg)
+
     # 步骤 2：当日日期（配置时区，幂等键）
     run_date = datetime.now().astimezone(ZoneInfo(cfg.app.timezone)).strftime("%Y-%m-%d")
 
@@ -332,6 +351,14 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
         print(f"  - {name}: {'成功' if ok else '失败'}（{detail}）")
     logger.info("采集 %d 条，去重后新入库 %d 条 run_id=%s", len(collected), len(new_ids), run_id)
     failed = [name for name, (ok, _) in stats.items() if not ok]
+
+    # 步骤 5.5：同步点击并回写偏好权重（设计文档 §15.5）。未配置/失败只记日志，不阻塞主流程。
+    if track_client is not None:
+        try:
+            sync_result = await sync_clicks(storage, track_client, cfg.tracking.click_delta)
+            print(f"点击同步：拉取 {sync_result['synced']} 条，回写权重 {sync_result['applied']} 条")
+        except TrackingError as e:
+            logger.warning("点击同步失败（不影响主流程）: %s", e)
 
     # 步骤 6：weights = storage.get_interest_weights() 合并 config 关键词
     # （语义：config.interests.keywords 优先，同名词以 config 权重为准；表中独有的词追加）
@@ -373,6 +400,17 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
             continue
         print(f"{pick.rank}. 【{picked.article.source}】{picked.article.title} —— {pick.reason}")
 
+    # 步骤 7.5：注册点击追踪短链（设计文档 §15.2）；注册失败的条目保留原始 URL（fail-open）
+    url_map: dict[int, str] = {}
+    if track_client is not None:
+        links = [(p.article_id, by_id[p.article_id].article.url)
+                 for p in picks if p.article_id in by_id]
+        if links:
+            try:
+                url_map = await track_client.register_links(links)
+            except Exception as e:  # noqa: BLE001 —— 追踪失败不得阻塞主流程
+                logger.warning("短链注册失败（使用原始链接）: %s", e)
+
     # 步骤 8：生成微信 markdown 简报（设计文档 §8；items = (rank, article, reason)）
     digest_items: list[tuple[int, Article, str]] = []
     for pick in picks:
@@ -380,7 +418,10 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
         if picked is None:
             logger.warning("精选条目无对应文章 article_id=%s，跳过", pick.article_id)
             continue
-        digest_items.append((pick.rank, picked.article, pick.reason))
+        article = picked.article
+        if pick.article_id in url_map:
+            article = dataclasses.replace(article, url=url_map[pick.article_id])
+        digest_items.append((pick.rank, article, pick.reason))
     digest_text = build_digest_text(digest_items, run_date)
 
     # 步骤 9：推送。dry-run → NoopPublisher 写 dry_run_file；幂等：当日已推送则跳过 webhook（设计文档 §5）

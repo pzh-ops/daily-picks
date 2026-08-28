@@ -33,8 +33,12 @@ def sample_config(tmp_path: Path) -> RootConfig:
 
 @pytest.fixture
 def mock_http():
-    """respx mock 上下文（assert_all_mocked=True），供各用例注册路由。"""
-    with respx.mock(assert_all_mocked=True) as m:
+    """respx mock 上下文（assert_all_mocked=True），供各用例注册路由。
+
+    assert_all_called=False：允许"注册但故意不调用"的路由（如 T-E2E-11 断言
+    tracking 关闭时零追踪请求）；对齐 test_llm/test_publisher/test_sources 的写法。
+    """
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as m:
         yield m
 
 
