@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 import pytest
 import yaml
@@ -127,3 +128,51 @@ class TestConfig:
         assert data["push"]["wecom"]["webhook_key_env"] == "WECOM_WEBHOOK_KEY"
         # 嵌套 YAML 拍平为 PushConfig 扁平字段
         assert cfg1.push.wecom_webhook_key_env == "WECOM_WEBHOOK_KEY"
+
+
+class TestTrackingConfig:
+    """T-CFG：tracking 配置段（设计文档 §15.6）。"""
+
+    # T-CFG-TRACK-01：默认关闭（base_url 空 → enabled False，默认值与 §11 一致）
+    def test_tracking_defaults_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        write_default_config("config.yaml")
+        cfg = load_config("config.yaml")
+        assert cfg.tracking.base_url == ""
+        assert cfg.tracking.enabled is False
+        assert cfg.tracking.api_key_env == "TRACKING_API_TOKEN"
+        assert cfg.tracking.timeout_s == 10
+        assert cfg.tracking.click_delta == 0.05
+
+    # T-CFG-TRACK-02：base_url 非空 → enabled True
+    def test_tracking_enabled_with_base_url(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        write_default_config("config.yaml")
+        text = Path("config.yaml").read_text(encoding="utf-8").replace(
+            'base_url: ""', 'base_url: "https://track.example.workers.dev"'
+        )
+        Path("config.yaml").write_text(text, encoding="utf-8")
+        cfg = load_config("config.yaml")
+        assert cfg.tracking.enabled is True
+
+    # T-CFG-TRACK-03：base_url 非法协议 → ConfigError
+    def test_tracking_bad_base_url_raises(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        write_default_config("config.yaml")
+        text = Path("config.yaml").read_text(encoding="utf-8").replace(
+            'base_url: ""', 'base_url: "ftp://bad"'
+        )
+        Path("config.yaml").write_text(text, encoding="utf-8")
+        with pytest.raises(ConfigError, match="tracking.base_url"):
+            load_config("config.yaml")
+
+    # T-CFG-TRACK-04：click_delta 越界 → ConfigError
+    def test_tracking_click_delta_out_of_range_raises(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        write_default_config("config.yaml")
+        text = Path("config.yaml").read_text(encoding="utf-8").replace(
+            "click_delta: 0.05", "click_delta: 0.5"
+        )
+        Path("config.yaml").write_text(text, encoding="utf-8")
+        with pytest.raises(ConfigError, match="tracking.click_delta"):
+            load_config("config.yaml")

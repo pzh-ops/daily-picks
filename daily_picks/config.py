@@ -62,6 +62,18 @@ class PushConfig(BaseSettings):
     dry_run_file: str = "logs/last_digest.md"
 
 
+class TrackingConfig(BaseSettings):
+    base_url: str = ""                 # 点击追踪中转服务地址（https://...）；留空 = 关闭点击追踪
+    api_key_env: str = "TRACKING_API_TOKEN"  # 与 Worker 端 wrangler secret API_TOKEN 同值
+    timeout_s: float = 10.0
+    click_delta: float = 0.05          # 每次点击的权重增量（弱信号，低于主动 like 的 0.1）
+
+    @property
+    def enabled(self) -> bool:
+        """base_url 非空即启用点击追踪（设计文档 §15.6）。"""
+        return bool(self.base_url.strip())
+
+
 class Keyword(BaseModel):
     keyword: str
     weight: float = 1.0
@@ -111,6 +123,7 @@ class RootConfig(BaseModel):
     interests: InterestsConfig = InterestsConfig()
     sources: SourcesConfig = SourcesConfig()
     push: PushConfig = PushConfig()
+    tracking: TrackingConfig = TrackingConfig()
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
 
@@ -183,6 +196,12 @@ push:
     sendkey_env: SERVERCHAN_SENDKEY
   dry_run_file: logs/last_digest.md
 
+tracking:
+  base_url: ""              # 点击追踪中转服务地址，如 https://track.xxx.workers.dev；留空 = 关闭点击追踪
+  api_key_env: TRACKING_API_TOKEN
+  timeout_s: 10
+  click_delta: 0.05         # 每次点击对命中关键词的权重增量（弱信号，低于主动 like 的 0.1）
+
 storage:
   db_path: data/daily_picks.db
 
@@ -241,6 +260,14 @@ def _validate(cfg: RootConfig) -> None:
     extra = getattr(cfg.sources, "__pydantic_extra__", None) or {}
     for name in extra:
         logger.warning("未知内容源配置段 %r，已忽略", name)
+    if not 0 < cfg.tracking.click_delta <= 0.2:
+        raise ConfigError(
+            f"tracking.click_delta 越界: {cfg.tracking.click_delta}（要求 0 < click_delta <= 0.2）"
+        )
+    if cfg.tracking.base_url and not cfg.tracking.base_url.startswith(("http://", "https://")):
+        raise ConfigError(
+            f"tracking.base_url 必须以 http:// 或 https:// 开头: {cfg.tracking.base_url!r}"
+        )
 
 
 def load_config(path: str = DEFAULT_CONFIG_PATH) -> RootConfig:
