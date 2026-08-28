@@ -23,3 +23,6 @@ htmlcov/
 
 # 系统
 .DS_Store
+
+# Cloudflare Worker 部署配置（含真实 database_id）
+wrangler.toml

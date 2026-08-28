@@ -116,6 +116,28 @@
 每日 08:00（Asia/Shanghai）触发：并发采集 6 源 → 去重入库 → 规则打分取 ≤40 候选 → DeepSeek
 精排 Top 10（失败自动降级为规则分）→ 生成简报 → 推送微信；当日幂等，重复运行不重复推送。
 
+## 点击追踪（v2）：点击即反馈
+
+推送链接默认是短链中转：`{你的 Worker 域名}/c/{8位随机码}`。点击链接 → Worker 302
+跳转原文并记录事件 → 下次 `daily-picks run`（或手动 `daily-picks track sync`）自动把
+点击回写为偏好（命中关键词权重 +0.05，上限 2.0）。
+
+启用步骤（详见 `worker/README.md`）：
+
+1. 部署 Worker（Cloudflare 免费）：`cd worker` 按 README 三步（d1 create → secret put → deploy）。
+2. 本地配置 `config.yaml`：
+
+```yaml
+tracking:
+  base_url: "https://daily-picks-track.xxx.workers.dev"
+```
+
+3. `.env` 加 `TRACKING_API_TOKEN=<与 Worker 端 API_TOKEN 同值>`。
+4. `daily-picks test track` 自检连通；`daily-picks track sync` 手动同步点击。
+
+未配置 `tracking.base_url` 时功能关闭，行为与 v1 完全一致。点击事件仅含文章 id 与
+时间戳，存储于你自己的 Cloudflare D1（个人账户）。
+
 ## 快速开始
 
 要求：Python 3.11 + [uv](https://docs.astral.sh/uv/)。

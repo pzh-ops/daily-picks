@@ -1,0 +1,12 @@
+# Cloudflare Workers 部署配置模板（设计文档 §15.6）
+# 使用步骤：复制为 wrangler.toml，并按 worker/README.md 替换 database_id。
+name = "daily-picks-track"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# 1. 运行 `npx wrangler d1 create daily-picks-track`，把输出的 database_id 填到下面
+# 2. wrangler.toml 含真实 id，不要提交（.gitignore 追加 wrangler.toml）
+[[d1_databases]]
+binding = "DB"
+database_name = "daily-picks-track"
+database_id = "<replace-me>"
