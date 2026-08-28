@@ -14,7 +14,9 @@ import secrets
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from daily_picks.feedback import hit_keywords
 from daily_picks.models import ClickEvent
+from daily_picks.storage import Storage
 
 logger = logging.getLogger("daily_picks.tracking")
 
@@ -135,3 +137,58 @@ class TrackingClient:
         except (ValueError, KeyError, TypeError) as e:
             raise TrackingError(f"点击响应非法: {e}") from e
         return events, has_more
+
+
+def apply_click(storage: Storage, article_id: int, delta: float) -> dict:
+    """点击 → 弱 like：文章 title+summary 命中关键词各 +delta（bump_keyword_weight 钳制 [0.2, 2.0]）。
+
+    与 apply_feedback 的差异（设计文档 §10/§15.5）：
+    - 不写 feedback 表（点击不是显式反馈）；步长默认 0.05（点击信号弱于主动 like 0.1）。
+    - 文章不存在或未命中关键词 → 权重不变（不抛异常，同步游标照常推进）。
+    返回 {'updated': [关键词...], 'missing': 文章是否不存在}。
+    """
+    rows = storage.get_articles_by_ids([article_id])
+    if not rows:
+        return {"updated": [], "missing": True}
+    weights = storage.get_interest_weights()
+    hits = hit_keywords(rows[0]["title"], rows[0]["summary"], weights)
+    for kw in hits:
+        storage.bump_keyword_weight(kw, delta)
+    logger.info("点击回写 article_id=%s 命中关键词=%s delta=%s", article_id, hits, delta)
+    return {"updated": hits, "missing": False}
+
+
+async def sync_clicks(storage: Storage, client: TrackingClient,
+                      delta: float = 0.05) -> dict:
+    """游标式同步点击并回写权重（幂等，可反复调用，设计文档 §15.5）。
+
+    流程：读 meta 表 last_click_sync_id 游标（默认 0）→ 循环 fetch_clicks(after) 直到
+    has_more=False → 每个事件 record_click 幂等落库，仅新事件 apply_click →
+    最后推进游标到已处理的最大 remote_id。
+    网络/响应错误抛 TrackingError（调用方 fail-open）。
+    返回 {'synced': 本次处理事件数, 'applied': 实际回写权重的文章数}。
+    """
+    cursor = storage.get_click_cursor()
+    after = cursor
+    synced = 0
+    applied = 0
+    while True:
+        events, has_more = await client.fetch_clicks(after)
+        for ev in events:
+            if storage.record_click(article_id=ev.article_id, click_date=ev.click_date,
+                                    remote_id=ev.remote_id, count=ev.count):
+                result = apply_click(storage, ev.article_id, delta)
+                if result["updated"]:
+                    applied += 1
+            synced += 1
+            after = max(after, ev.remote_id)
+        if not has_more:
+            break
+        if not events:
+            # 防御：worker 返回 has_more=True 但本页为空，终止避免死循环
+            logger.warning("点击同步：has_more=True 但本页无事件，终止同步")
+            break
+    if after > cursor:
+        storage.set_click_cursor(after)
+    logger.info("点击同步完成 cursor=%s synced=%s applied=%s", after, synced, applied)
+    return {"synced": synced, "applied": applied}
