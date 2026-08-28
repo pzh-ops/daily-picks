@@ -17,8 +17,9 @@ class FeedbackError(Exception):
     """反馈错误（非法 kind / 文章不存在），CLI 捕获后提示并退出码 1。"""
 
 
-def _hit_keywords(title: str | None, summary: str | None, weights: dict[str, float]) -> list[str]:
-    """title+summary 中命中的关键词（大小写不敏感子串匹配，对齐 §7.1 keyword_score）。"""
+def hit_keywords(title: str | None, summary: str | None, weights: dict[str, float]) -> list[str]:
+    """title+summary 中命中的关键词（大小写不敏感子串匹配，对齐 §7.1 keyword_score）。
+    公开供 tracking.apply_click 复用（点击回写与 like 同口径取词）。"""
     text = f"{title or ''} {summary or ''}".lower()
     return [kw for kw in weights if kw and kw.lower() in text]
 
@@ -40,7 +41,7 @@ def apply_feedback(storage: Storage, article_id: int, kind: str,
         raise FeedbackError(f"文章 id={article_id} 不存在，无法提交反馈")
 
     weights = storage.get_interest_weights()
-    hits = _hit_keywords(rows[0]["title"], rows[0]["summary"], weights)
+    hits = hit_keywords(rows[0]["title"], rows[0]["summary"], weights)
 
     if kind == "like":
         if hits:

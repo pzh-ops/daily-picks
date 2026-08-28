@@ -124,3 +124,11 @@ class TestApplyFeedbackEdges:
         result = apply_feedback(tmp_db, aid, "like", extra_keyword="开源")
         assert result["updated"] == ["AI"]  # 有命中时 extra_keyword 不参与
         assert weight(tmp_db, "开源") is None
+
+
+def test_hit_keywords_public_helper():  # T-FBK-HIT
+    """hit_keywords 公开供 tracking 复用：大小写不敏感、返回权重表插入序。"""
+    from daily_picks.feedback import hit_keywords
+    assert hit_keywords("AI 编程工具", "大模型实战", {"AI": 1.0, "大模型": 1.5}) == ["AI", "大模型"]
+    assert hit_keywords("Rust 入门", None, {"AI": 1.0, "rust": 1.0}) == ["rust"]
+    assert hit_keywords("前端", "后端", {}) == []

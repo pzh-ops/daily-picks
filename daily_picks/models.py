@@ -63,3 +63,13 @@ class ScoredArticle:
     article: Article
     score: float
     article_id: int | None = None  # DB 主键：LLM 候选 JSON 与降级 Pick 回指文章用（开发文档 §3，M2 修订）
+
+
+@dataclass(slots=True)
+class ClickEvent:
+    """Worker 端聚合后的一条点击事件（每文章每天一条；count 为当日点击次数）。"""
+
+    remote_id: int      # worker 端 clicks.id（同步幂等键）
+    article_id: int     # 本地 articles.id（注册短链时由本地写入 worker）
+    click_date: str     # 'YYYY-MM-DD'（UTC，仅展示/记录，不参与回写逻辑）
+    count: int          # 该文章当日点击次数
