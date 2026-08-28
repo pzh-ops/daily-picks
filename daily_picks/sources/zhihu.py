@@ -41,7 +41,8 @@ class ZhihuAdapter(SourceAdapter):
                 if not t.get("id") or not t.get("title"):
                     logger.warning("zhihu 条目缺 target.id/title，跳过")
                     continue
-                url = (t.get("url") or "").replace("api.zhihu.com", "www.zhihu.com")
+                url = (t.get("url") or "").replace("api.zhihu.com", "www.zhihu.com").replace("/questions/", "/question/")
+                # ⚠️ 必须转单数 question/：知乎网页端标准路径；复数 questions/ 返回软 404（HTTP 200 + "404 - 知乎"页）
                 try:
                     title, summary, url = self._clean(t["title"], t.get("excerpt"), url)
                 except SourceError as e:

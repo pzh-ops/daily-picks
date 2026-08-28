@@ -202,7 +202,7 @@ class TestZhihu:
         assert a.source == "zhihu"
         assert a.source_key == "2075969425702741132"
         assert "api.zhihu.com" not in a.url
-        assert a.url == "https://www.zhihu.com/questions/2075969425702741132"
+        assert a.url == "https://www.zhihu.com/question/2075969425702741132"
         assert a.title.startswith("西藏日喀则")
         assert a.summary is not None and "泥石流" in a.summary
         assert a.published_at == datetime.fromtimestamp(1787729680)
