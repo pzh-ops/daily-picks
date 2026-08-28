@@ -133,7 +133,10 @@ tracking:
 ```
 
 3. `.env` 加 `TRACKING_API_TOKEN=<与 Worker 端 API_TOKEN 同值>`。
-4. `daily-picks test track` 自检连通；`daily-picks track sync` 手动同步点击。
+4. `daily-picks test track` 自检连通：验证 Worker 可达且鉴权有效（未配置时提示「未启用」，
+   退出码 1，不阻塞主流程）。
+5. `daily-picks track sync` 手动同步：拉取点击事件并回写偏好权重（幂等，可反复执行；
+   `run` 每次执行时也会自动同步，见 §快速开始）。
 
 未配置 `tracking.base_url` 时功能关闭，行为与 v1 完全一致。点击事件仅含文章 id 与
 时间戳，存储于你自己的 Cloudflare D1（个人账户）。
@@ -147,15 +150,17 @@ git clone git@github.com:pzh-ops/daily-picks.git && cd daily-picks
 uv sync                                  # 安装依赖
 
 cp .env.example .env                     # 填入 DEEPSEEK_API_KEY（推送 key 可选）
-uv run daily-picks init                  # 生成 config.yaml + 初始化 SQLite（5 张表）
+uv run daily-picks init                  # 生成 config.yaml + 初始化 SQLite（7 张表）
 
 uv run daily-picks run --dry-run         # 预览今日精选（写 logs/last_digest.md，不推送）
 uv run daily-picks test push             # 推送连通性自检（发一条测试消息）
 uv run daily-picks test llm              # LLM 连通性自检（验证 DeepSeek key 与延迟）
+uv run daily-picks test track            # 点击追踪自检：验证 Worker 连通与鉴权（未配置时退出码 1）
 uv run daily-picks run                   # 立即完整执行（采集→排序→推送）
 uv run daily-picks serve                 # 常驻调度：每天 08:00（Asia/Shanghai）自动执行
 uv run daily-picks feedback like 12      # 偏好反馈：like/dislike 调整关键词权重（可加 --keyword）
 uv run daily-picks stats --days 7        # 统计报表：运行/推送/token/成本（USD + CNY）
+uv run daily-picks track sync            # 手动同步点击：拉取点击事件并回写偏好权重（幂等）
 ```
 
 ## 配置说明
