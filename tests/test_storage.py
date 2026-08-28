@@ -200,3 +200,34 @@ class TestStorageErrorPaths:
             tmp_db.get_interest_weights()
         with pytest.raises(StorageError):
             tmp_db.bump_keyword_weight("AI", 0.1)
+
+
+class TestClicksAndMeta:
+    """T-STORE：clicks/meta 表（设计文档 §5/§15.5）。"""
+
+    def test_meta_upsert(self, tmp_db):
+        assert tmp_db.get_meta("k") is None
+        tmp_db.set_meta("k", "v1")
+        assert tmp_db.get_meta("k") == "v1"
+        tmp_db.set_meta("k", "v2")  # 覆盖
+        assert tmp_db.get_meta("k") == "v2"
+
+    def test_click_cursor_roundtrip(self, tmp_db):
+        assert tmp_db.get_click_cursor() == 0
+        tmp_db.set_click_cursor(7)
+        assert tmp_db.get_click_cursor() == 7
+        tmp_db.set_click_cursor(9)  # 单调前进由调用方保证，这里只验证读写
+        assert tmp_db.get_click_cursor() == 9
+
+    def test_record_click_idempotent_by_remote_id(self, tmp_db):
+        first = tmp_db.record_click(article_id=1, click_date="2026-08-28", remote_id=5, count=2)
+        again = tmp_db.record_click(article_id=1, click_date="2026-08-28", remote_id=5, count=2)
+        assert first is True
+        assert again is False  # 幂等：同 remote_id 第二次不新增
+        assert tmp_db.count_clicks() == 1
+
+    def test_count_clicks(self, tmp_db):
+        assert tmp_db.count_clicks() == 0
+        tmp_db.record_click(article_id=1, click_date="2026-08-28", remote_id=1, count=1)
+        tmp_db.record_click(article_id=2, click_date="2026-08-28", remote_id=2, count=3)
+        assert tmp_db.count_clicks() == 2

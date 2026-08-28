@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS interest_weights (
     weight     REAL NOT NULL DEFAULT 1.0,         -- 范围 [0.2, 2.0]
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS clicks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id  INTEGER NOT NULL REFERENCES articles(id),
+    click_date  TEXT NOT NULL,               -- worker 端 click_date（UTC 'YYYY-MM-DD'）
+    remote_id   INTEGER NOT NULL UNIQUE,     -- worker 端 clicks.id，幂等键
+    count       INTEGER NOT NULL DEFAULT 1,  -- 该文章当日点击次数（worker 端聚合）
+    applied_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -291,3 +305,54 @@ class Storage:
             "tokens_out": row["tokens_out"],
             "cost_usd": row["cost_usd"],
         }
+
+    # ---- 点击追踪（设计文档 §15.5）----
+
+    CLICK_CURSOR_KEY = "last_click_sync_id"
+
+    def get_meta(self, key: str) -> str | None:
+        """读 meta 表；不存在返回 None。"""
+        with self._lock:
+            try:
+                row = self._conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            except sqlite3.Error as e:
+                raise StorageError(f"读取 meta 失败: {e}") from e
+        return row["value"] if row is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """upsert meta（存在则覆盖）。"""
+        with self._lock:
+            self._execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+
+    def get_click_cursor(self) -> int:
+        """点击同步游标（meta 表 CLICK_CURSOR_KEY）；无记录 → 0。"""
+        value = self.get_meta(self.CLICK_CURSOR_KEY)
+        return int(value) if value is not None else 0
+
+    def set_click_cursor(self, remote_id: int) -> None:
+        """推进点击同步游标到 remote_id（调用方保证单调前进）。"""
+        self.set_meta(self.CLICK_CURSOR_KEY, str(remote_id))
+
+    def record_click(self, *, article_id: int, click_date: str,
+                     remote_id: int, count: int) -> bool:
+        """记录一条已同步的点击事件（remote_id 幂等）；返回是否为新事件。"""
+        with self._lock:
+            cur = self._execute(
+                "INSERT OR IGNORE INTO clicks (article_id, click_date, remote_id, count)"
+                " VALUES (?, ?, ?, ?)",
+                (article_id, click_date, remote_id, count),
+            )
+            return cur.rowcount == 1
+
+    def count_clicks(self) -> int:
+        """clicks 表总行数（统计/验收用）。"""
+        with self._lock:
+            try:
+                row = self._conn.execute("SELECT COUNT(*) FROM clicks").fetchone()
+            except sqlite3.Error as e:
+                raise StorageError(f"统计 clicks 失败: {e}") from e
+        return int(row[0])
