@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 import respx  # noqa: F401  # respx mock 路由器经 conftest 的 mock_http fixture 激活（brief 要求保留该 import）
 
+from daily_picks.models import ClickEvent
 from daily_picks.tracking import (
     CODE_ALPHABET,
     CODE_LENGTH,
@@ -82,3 +84,32 @@ class TestRegisterLinks:
         result = await client.register_links([(42, "https://example.com/a")])
         assert list(result) == [42]
         assert route.call_count == 3
+
+
+class TestFetchClicks:
+    # T-TRACK-06：正常响应解析为 ClickEvent 列表 + has_more
+    async def test_fetch_clicks_ok(self, mock_http):
+        route = mock_http.get(CLICKS_URL).mock(return_value=httpx.Response(200, json={
+            "clicks": [{"id": 3, "article_id": 42, "click_date": "2026-08-28", "count": 2}],
+            "has_more": False,
+        }))
+        client = TrackingClient(BASE, "test-token")
+        events, has_more = await client.fetch_clicks(0)
+        assert events == [ClickEvent(remote_id=3, article_id=42,
+                                     click_date="2026-08-28", count=2)]
+        assert has_more is False
+        assert route.calls[0].request.headers["Authorization"] == "Bearer test-token"
+
+    # T-TRACK-07：401 → TrackingError（4xx 不重试）
+    async def test_fetch_clicks_unauthorized(self, mock_http):
+        mock_http.get(CLICKS_URL).mock(return_value=httpx.Response(401))
+        client = TrackingClient(BASE, "test-token")
+        with pytest.raises(TrackingError, match="401"):
+            await client.fetch_clicks(0)
+
+    # T-TRACK-08：响应结构非法 → TrackingError
+    async def test_fetch_clicks_malformed(self, mock_http):
+        mock_http.get(CLICKS_URL).mock(return_value=httpx.Response(200, json={"clicks": "oops"}))
+        client = TrackingClient(BASE, "test-token")
+        with pytest.raises(TrackingError, match="响应非法"):
+            await client.fetch_clicks(0)

@@ -14,6 +14,8 @@ import secrets
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from daily_picks.models import ClickEvent
+
 logger = logging.getLogger("daily_picks.tracking")
 
 # 短码字符表（62 进制字母数字）与长度（设计文档 §15.2）
@@ -93,3 +95,43 @@ class TrackingClient:
                 logger.warning("短链注册被拒绝 article_id=%s: HTTP %s %s",
                                article_id, resp.status_code, resp.text[:100])
         return registered
+
+    @retry(
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
+        stop=stop_after_attempt(TRACK_RETRIES),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=5.0),
+        reraise=True,
+    )
+    async def _get(self, url: str) -> httpx.Response:
+        """GET；5xx 抛 HTTPStatusError 触发重试，其余状态原样返回。"""
+        try:
+            client = httpx.AsyncClient(timeout=self.timeout_s)
+        except ImportError as e:
+            # 环境代理不可用（如 socks5 代理但未装 socksio）：降级为直连（对齐 publisher/_make_client、cli._collect）
+            logger.warning("httpx 初始化失败（环境代理配置不可用），改用直连: %s", e)
+            client = httpx.AsyncClient(timeout=self.timeout_s, trust_env=False)
+        async with client:
+            resp = await client.get(url, headers=self._auth_headers())
+            if resp.status_code >= 500:
+                resp.raise_for_status()
+            return resp
+
+    async def fetch_clicks(self, after: int) -> tuple[list[ClickEvent], bool]:
+        """拉取 id > after 的点击事件；返回 (events, has_more)。失败抛 TrackingError。"""
+        try:
+            resp = await self._get(f"{self.base_url}/api/clicks?after={after}")
+        except httpx.HTTPError as e:
+            raise TrackingError(f"拉取点击失败: {e}") from e
+        if resp.status_code != 200:
+            raise TrackingError(f"拉取点击失败: HTTP {resp.status_code} {resp.text[:100]}")
+        try:
+            data = resp.json()
+            events = [
+                ClickEvent(remote_id=item["id"], article_id=item["article_id"],
+                           click_date=item["click_date"], count=item["count"])
+                for item in data["clicks"]
+            ]
+            has_more = bool(data["has_more"])
+        except (ValueError, KeyError, TypeError) as e:
+            raise TrackingError(f"点击响应非法: {e}") from e
+        return events, has_more
