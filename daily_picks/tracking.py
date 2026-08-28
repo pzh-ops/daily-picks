@@ -11,6 +11,9 @@ from __future__ import annotations
 import logging
 import secrets
 
+import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
 logger = logging.getLogger("daily_picks.tracking")
 
 # 短码字符表（62 进制字母数字）与长度（设计文档 §15.2）
@@ -34,3 +37,59 @@ def gen_code(length: int = CODE_LENGTH) -> str:
 def build_tracking_url(base_url: str, code: str) -> str:
     """短链：{base 去尾斜杠}/c/{code}。"""
     return f"{base_url.rstrip('/')}/c/{code}"
+
+
+class TrackingClient:
+    """点击追踪服务 HTTP 客户端（契约见设计文档 §15.3）。5xx/超时重试 3 次（tenacity）。"""
+
+    def __init__(self, base_url: str, api_key: str, timeout_s: float = 10.0):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout_s = timeout_s
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}"}
+
+    @retry(
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
+        stop=stop_after_attempt(TRACK_RETRIES),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=5.0),
+        reraise=True,
+    )
+    async def _post(self, url: str, body: dict) -> httpx.Response:
+        """POST JSON；5xx 抛 HTTPStatusError 触发重试，其余状态原样返回。"""
+        try:
+            client = httpx.AsyncClient(timeout=self.timeout_s)
+        except ImportError as e:
+            # 环境代理不可用（如 socks5 代理但未装 socksio）：降级为直连（对齐 publisher/_make_client、cli._collect）
+            logger.warning("httpx 初始化失败（环境代理配置不可用），改用直连: %s", e)
+            client = httpx.AsyncClient(timeout=self.timeout_s, trust_env=False)
+        async with client:
+            resp = await client.post(url, json=body, headers=self._auth_headers())
+            if resp.status_code >= 500:
+                resp.raise_for_status()
+            return resp
+
+    async def register_links(self, links: list[tuple[int, str]]) -> dict[int, str]:
+        """为 (article_id, url) 列表注册短链；返回 {article_id: tracking_url}（仅成功项）。
+
+        每条独立注册：失败（4xx/网络异常）记 WARNING 并跳过，不影响其余条目——
+        调用方对缺失的 article_id 保留原始 URL（fail-open，设计文档 §15.1）。
+        """
+        registered: dict[int, str] = {}
+        for article_id, url in links:
+            code = gen_code()
+            try:
+                resp = await self._post(
+                    f"{self.base_url}/api/links",
+                    {"code": code, "url": url, "article_id": article_id},
+                )
+            except httpx.HTTPError as e:
+                logger.warning("短链注册失败 article_id=%s: %s", article_id, e)
+                continue
+            if resp.status_code == 200:
+                registered[article_id] = build_tracking_url(self.base_url, code)
+            else:
+                logger.warning("短链注册被拒绝 article_id=%s: HTTP %s %s",
+                               article_id, resp.status_code, resp.text[:100])
+        return registered
