@@ -26,7 +26,7 @@ from daily_picks.publisher import NoopPublisher, create_publisher
 from daily_picks.ranker import rank_and_pick, rule_score, select_candidates
 from daily_picks.scheduler import run_forever
 from daily_picks.sources import SourceAdapter, build_adapters
-from daily_picks.storage import Storage
+from daily_picks.storage import Storage, StorageError
 from daily_picks.tracking import TrackingClient, TrackingError, sync_clicks
 
 logger = logging.getLogger("daily_picks.cli")
@@ -148,7 +148,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 def cmd_track(args: argparse.Namespace) -> int:
     """track 子命令：sync 同步点击并回写偏好权重（设计文档 §15.5）。
-    未启用（base_url 空/缺 token）→ 退出码 1；TrackingError → 退出码 1。"""
+    未启用（base_url 空/缺 token）→ 退出码 1；同步/存储故障（TrackingError/StorageError）→ 退出码 1。"""
     cfg = load_config(DEFAULT_CONFIG_PATH)
     setup_logging(level=cfg.logging.level, log_file=cfg.logging.file,
                   max_bytes=cfg.logging.max_bytes, backup_count=cfg.logging.backup_count)
@@ -160,7 +160,7 @@ def cmd_track(args: argparse.Namespace) -> int:
         return 1
     try:
         result = asyncio.run(sync_clicks(storage, client, cfg.tracking.click_delta))
-    except TrackingError as e:
+    except (TrackingError, StorageError) as e:
         print(f"点击同步失败: {e}", file=sys.stderr)
         return 1
     print(f"同步完成：拉取 {result['synced']} 条点击，回写权重 {result['applied']} 条")
@@ -399,7 +399,7 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
         try:
             sync_result = await sync_clicks(storage, track_client, cfg.tracking.click_delta)
             print(f"点击同步：拉取 {sync_result['synced']} 条，回写权重 {sync_result['applied']} 条")
-        except TrackingError as e:
+        except (TrackingError, StorageError) as e:
             logger.warning("点击同步失败（不影响主流程）: %s", e)
 
     # 步骤 6：weights = storage.get_interest_weights() 合并 config 关键词

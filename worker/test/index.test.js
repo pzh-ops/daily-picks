@@ -68,6 +68,19 @@ test("GET /c/{code}：302 重定向并记录点击", async () => {
   assert.deepEqual(store.clicks.map((c) => [c.article_id, c.count]), [[42, 1]]);
 });
 
+test("GET /c/{code}：recordClick 抛错仍 302", async () => {
+  class BrokenRecordStore extends MemoryStore {
+    async recordClick() {
+      throw new Error("D1 write failed");
+    }
+  }
+  const store = new BrokenRecordStore();
+  await store.upsertLink({ code: CODE, url: "https://example.com/post/1", articleId: 42 });
+  const res = await handleRequest(makeRequest(`/c/${CODE}`), makeEnv(), store);
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get("Location"), "https://example.com/post/1");
+});
+
 test("GET /c/{code}：未知 code 或非法格式 → 404 且不记录点击", async () => {
   const store = new MemoryStore();
   assert.equal((await handleRequest(makeRequest("/c/nope1234"), makeEnv(), store)).status, 404);

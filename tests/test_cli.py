@@ -16,7 +16,7 @@ from daily_picks import cli as cli_mod
 from daily_picks.cli import cmd_feedback, cmd_init, cmd_serve, cmd_stats, cmd_test, main
 from daily_picks.config import write_default_config
 from daily_picks.models import Article
-from daily_picks.storage import Storage
+from daily_picks.storage import Storage, StorageError
 
 LLM_URL = "https://api.deepseek.com/chat/completions"
 
@@ -222,6 +222,17 @@ class TestTrackCmd:
     def test_track_sync_failure_exit_1(self, tmp_path, monkeypatch, capsys, mock_http):
         self._enable_tracking(tmp_path, monkeypatch)
         mock_http.get(f"{self.TRACK_BASE}/api/clicks").mock(return_value=httpx.Response(401))
+        assert main(["track", "sync"]) == 1
+        assert "点击同步失败" in capsys.readouterr().err
+
+    def test_track_sync_storage_error_exit_1(self, tmp_path, monkeypatch, capsys):
+        """StorageError（如 sqlite 读写失败）同样视为同步失败：退出码 1 而非崩溃。"""
+        self._enable_tracking(tmp_path, monkeypatch)
+
+        def _boom(self):
+            raise StorageError("boom")
+
+        monkeypatch.setattr(Storage, "get_click_cursor", _boom)
         assert main(["track", "sync"]) == 1
         assert "点击同步失败" in capsys.readouterr().err
 

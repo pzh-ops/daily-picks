@@ -12,7 +12,7 @@ import pytest
 
 from daily_picks.cli import run_once
 from daily_picks.models import Article
-from daily_picks.storage import Storage
+from daily_picks.storage import Storage, StorageError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -237,3 +237,22 @@ class TestTrackingIntegration:
         assert await run_once(e2e_cfg, dry_run=True) == 0
         assert links_route.call_count == 0
         assert clicks_route.call_count == 0
+
+    # T-E2E-12：点击同步遇存储故障（StorageError）→ fail-open：run 仍返回 0，游标不推进
+    async def test_tracking_sync_storage_error_fail_open(
+            self, e2e_cfg, mock_http, frozen_now, monkeypatch):
+        monkeypatch.setenv("TRACKING_API_TOKEN", "test-token")
+        e2e_cfg.tracking.base_url = TRACK_BASE
+        mock_sources(mock_http)
+        mock_http.post(LINKS_URL).mock(return_value=httpx.Response(200, json={"ok": True}))
+
+        def _boom(self):
+            raise StorageError("boom")
+
+        monkeypatch.setattr(Storage, "get_click_cursor", _boom)
+        assert await run_once(e2e_cfg, dry_run=True) == 0
+        monkeypatch.undo()  # 恢复 Storage.get_click_cursor，便于读取真实游标
+        text = Path(e2e_cfg.push.dry_run_file).read_text(encoding="utf-8")
+        assert "/c/" in text                     # 短链注册不受同步失败影响（步骤 7.5）
+        assert "链接：" in text
+        assert Storage(Path(e2e_cfg.storage.db_path)).get_click_cursor() == 0  # 游标未推进

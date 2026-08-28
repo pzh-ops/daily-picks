@@ -26,7 +26,12 @@ export async function handleRequest(request, env, store = new Store(env.DB)) {
     if (!link) {
       return new Response("link not found", { status: 404 });
     }
-    await store.recordClick(link.article_id, utcDate());
+    // 记录失败不阻塞 302（契约 §15.3 遥测降级：302 + 记录失败，优于主功能降级）
+    try {
+      await store.recordClick(link.article_id, utcDate());
+    } catch (err) {
+      console.warn(`recordClick failed: ${err.message}`);
+    }
     return new Response("", { status: 302, headers: { Location: link.url } });
   }
 

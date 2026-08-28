@@ -202,7 +202,7 @@ LLM 参数（模型默认 `deepseek-v4-pro`）、兴趣关键词权重、推送�
 ## 开发
 
 ```bash
-uv run pytest          # 全量测试（200 例，覆盖率 97.7%）
+uv run pytest          # 全量测试（236 例，覆盖率 97.5%）
 uv run ruff check .    # Lint
 ```
 
