@@ -66,7 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats.add_argument("--days", type=int, default=7, help="统计最近 N 天（默认 7）")
 
     p_test = sub.add_parser("test", help="连通性自检")
-    p_test.add_argument("target", choices=["llm", "push"], help="自检目标")
+    p_test.add_argument("target", choices=["llm", "push", "track"], help="自检目标")
+
+    p_track = sub.add_parser("track", help="点击追踪：同步点击数据并回写偏好权重（v2）")
+    p_track_sub = p_track.add_subparsers(dest="track_command", required=True, metavar="子命令")
+    p_track_sub.add_parser("sync", help="立即同步一次点击数据")
 
     return parser
 
@@ -139,6 +143,27 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(f"  Token 输出: {stats['tokens_out']}")
     print(f"  成本(USD):  ${cost_usd:.6f}")
     print(f"  成本(CNY):  ¥{cost_usd * USD_TO_CNY:.4f}（按 1 USD = {USD_TO_CNY:g} CNY 估算）")
+    return 0
+
+
+def cmd_track(args: argparse.Namespace) -> int:
+    """track 子命令：sync 同步点击并回写偏好权重（设计文档 §15.5）。
+    未启用（base_url 空/缺 token）→ 退出码 1；TrackingError → 退出码 1。"""
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    setup_logging(level=cfg.logging.level, log_file=cfg.logging.file,
+                  max_bytes=cfg.logging.max_bytes, backup_count=cfg.logging.backup_count)
+    storage = _open_storage(cfg)
+    client = _make_tracking_client(cfg)
+    if client is None:
+        print("点击追踪未启用：请先在 config.yaml 配置 tracking.base_url，并在环境变量设置 "
+              f"{cfg.tracking.api_key_env}", file=sys.stderr)
+        return 1
+    try:
+        result = asyncio.run(sync_clicks(storage, client, cfg.tracking.click_delta))
+    except TrackingError as e:
+        print(f"点击同步失败: {e}", file=sys.stderr)
+        return 1
+    print(f"同步完成：拉取 {result['synced']} 条点击，回写权重 {result['applied']} 条")
     return 0
 
 
@@ -259,11 +284,28 @@ async def _test_llm(cfg: RootConfig) -> int:
     return 0
 
 
+async def _test_track(cfg: RootConfig) -> int:
+    """test track：GET /api/clicks?after=0 验证追踪服务连通与鉴权（设计文档 R-012）。"""
+    client = _make_tracking_client(cfg)
+    if client is None:
+        print("点击追踪未启用：tracking.base_url 为空或未设置 API token", file=sys.stderr)
+        return 1
+    try:
+        events, has_more = await client.fetch_clicks(0)
+    except TrackingError as e:
+        print(f"追踪服务自检失败: {e}", file=sys.stderr)
+        return 1
+    print(f"追踪服务 OK：已返回 {len(events)} 条点击事件（has_more={has_more}）")
+    return 0
+
+
 def cmd_test(args: argparse.Namespace) -> int:
-    """test 子命令：llm/push 连通性自检（设计文档 R-010）。"""
+    """test 子命令：llm/push/track 连通性自检（设计文档 R-010/R-012）。"""
     cfg = load_config(DEFAULT_CONFIG_PATH)
     if args.target == "llm":
         return asyncio.run(_test_llm(cfg))
+    if args.target == "track":
+        return asyncio.run(_test_track(cfg))
     return asyncio.run(_test_push(cfg))
 
 
@@ -486,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         "feedback": cmd_feedback,
         "stats": cmd_stats,
         "test": cmd_test,
+        "track": cmd_track,
     }
     try:
         return handlers[args.command](args)

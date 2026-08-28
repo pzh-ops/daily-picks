@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -187,3 +188,79 @@ class TestTestLLM:
         assert cmd_test(argparse.Namespace(target="llm")) == 1
         err = capsys.readouterr().err
         assert "未配置 DEEPSEEK_API_KEY" in err
+
+
+class TestTrackCmd:
+    """M9 track 子命令：respx mock 追踪服务（禁真实网络）。"""
+
+    TRACK_BASE = "https://track.example.workers.dev"
+
+    def _enable_tracking(self, tmp_path, monkeypatch):
+        """写默认配置并把 tracking.base_url 置为测试地址。"""
+        chdir_with_default_config(tmp_path, monkeypatch)
+        path = Path("config.yaml")
+        text = path.read_text(encoding="utf-8").replace(
+            'base_url: ""', f'base_url: "{self.TRACK_BASE}"'
+        )
+        path.write_text(text, encoding="utf-8")
+        monkeypatch.setenv("TRACKING_API_TOKEN", "test-token")
+
+    def test_track_sync_ok(self, tmp_path, monkeypatch, capsys, mock_http):
+        self._enable_tracking(tmp_path, monkeypatch)
+        mock_http.get(f"{self.TRACK_BASE}/api/clicks").mock(
+            return_value=httpx.Response(200, json={"clicks": [], "has_more": False}))
+        assert main(["track", "sync"]) == 0
+        out = capsys.readouterr().out
+        assert "同步完成" in out
+        assert "拉取 0 条点击" in out
+
+    def test_track_sync_disabled_exit_1(self, tmp_path, monkeypatch, capsys):
+        chdir_with_default_config(tmp_path, monkeypatch)  # base_url 空 = 关闭
+        assert main(["track", "sync"]) == 1
+        assert "未启用" in capsys.readouterr().err
+
+    def test_track_sync_failure_exit_1(self, tmp_path, monkeypatch, capsys, mock_http):
+        self._enable_tracking(tmp_path, monkeypatch)
+        mock_http.get(f"{self.TRACK_BASE}/api/clicks").mock(return_value=httpx.Response(401))
+        assert main(["track", "sync"]) == 1
+        assert "点击同步失败" in capsys.readouterr().err
+
+
+class TestTestTrack:
+    """M9 test track 子命令。"""
+
+    TRACK_BASE = "https://track.example.workers.dev"
+
+    def test_track_ping_ok(self, tmp_path, monkeypatch, capsys, mock_http):
+        chdir_with_default_config(tmp_path, monkeypatch)
+        path = Path("config.yaml")
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                'base_url: ""', f'base_url: "{self.TRACK_BASE}"'
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TRACKING_API_TOKEN", "test-token")
+        mock_http.get(f"{self.TRACK_BASE}/api/clicks").mock(
+            return_value=httpx.Response(200, json={"clicks": [], "has_more": False}))
+        assert main(["test", "track"]) == 0
+        assert "追踪服务 OK" in capsys.readouterr().out
+
+    def test_track_ping_unauthorized_exit_1(self, tmp_path, monkeypatch, capsys, mock_http):
+        chdir_with_default_config(tmp_path, monkeypatch)
+        path = Path("config.yaml")
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                'base_url: ""', f'base_url: "{self.TRACK_BASE}"'
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TRACKING_API_TOKEN", "test-token")
+        mock_http.get(f"{self.TRACK_BASE}/api/clicks").mock(return_value=httpx.Response(401))
+        assert main(["test", "track"]) == 1
+        assert "自检失败" in capsys.readouterr().err
+
+    def test_track_ping_disabled_exit_1(self, tmp_path, monkeypatch, capsys):
+        chdir_with_default_config(tmp_path, monkeypatch)
+        assert main(["test", "track"]) == 1
+        assert "未启用" in capsys.readouterr().err
