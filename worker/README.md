@@ -7,7 +7,7 @@
 ```bash
 cd worker
 npm install -g wrangler        # 或每次用 npx wrangler@latest
-node --test test/              # 12+4 个用例全绿（无网络、无 D1）
+node --test                   # 11+4 个用例全绿（无网络、无 D1）
 ```
 
 ## 2. 创建 D1 数据库并建表
