@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from daily_picks.config import RootConfig
+from daily_picks.config import DEFAULT_CONFIG_PATH, RootConfig, save_config
 from daily_picks.llm import LLMClient, LLMError
 from daily_picks.storage import Storage
 
@@ -118,3 +118,30 @@ async def _llm_recommend(tags: list[str], llm: LLMClient, storage: Storage) -> l
         storage.register_source(key, name, url, tags)
         keys.append(key)
     return keys
+
+
+async def run_setup(cfg: RootConfig, storage: Storage, llm: LLMClient | None) -> int:
+    """交互式向导（docs/05 §1.1）：标签 → 来源 → 条数 → user_profile + config.yaml 写回。
+
+    幂等可重跑；KeyboardInterrupt → 提示后返回 130，不写任何数据。
+    """
+    try:
+        tags = choose_tags(llm)
+        sources = await recommend_sources(tags, llm, storage)
+        print(f"推荐信息源（{len(sources)} 个）：")
+        for key in sources:
+            print(f"  - {key}")
+        input("确认信息源？（回车确认，后期版本支持自定义增删）: ")
+        top_n = choose_top_n()
+    except KeyboardInterrupt:
+        print("向导未完成，可随时重跑 daily-picks setup")
+        return 130
+    storage.save_profile(tags, sources, top_n)
+    cfg.profile.enabled = True
+    cfg.profile.tags = tags
+    cfg.profile.sources = sources
+    cfg.profile.top_n = top_n
+    save_config(cfg, DEFAULT_CONFIG_PATH)
+    print(f"配置完成：标签 {len(tags)} 个、信息源 {len(sources)} 个、每日 {top_n} 条。")
+    print("可运行 `daily-picks run --dry-run` 预览 v3 深度精选。")
+    return 0

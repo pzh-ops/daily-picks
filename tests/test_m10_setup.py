@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import json as json_mod
 
@@ -16,8 +17,9 @@ from daily_picks.setup import (
     choose_tags,
     choose_top_n,
     recommend_sources,
+    run_setup,
 )
-from daily_picks.storage import StorageError
+from daily_picks.storage import Storage, StorageError
 
 
 class TestV3Config:
@@ -240,3 +242,74 @@ class TestLlmChat:
         assert text == '{"a": 1}'
         assert client.messages == [{"role": "system", "content": "sys"},
                                    {"role": "user", "content": "user"}]
+
+
+class TestRunSetup:
+    def _env(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        write_default_config("config.yaml")
+        cfg = load_config("config.yaml")
+        (tmp_path / "data").mkdir(parents=True, exist_ok=True)  # Storage 要求父目录存在
+        storage = Storage(tmp_path / "data" / "test.db")
+        storage.init_schema()
+        return cfg, storage
+
+    # T-SETUP-09 完整向导写库
+    async def test_full_wizard_writes_profile_and_config(self, tmp_path, monkeypatch, capsys):
+        cfg, storage = self._env(tmp_path, monkeypatch)
+        inputs = iter(["1,2", "", "3"])  # 标签 1,2 → 来源回车（内置推荐）→ 条数 3
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        assert await run_setup(cfg, storage, None) == 0
+        profile = storage.load_profile()
+        assert profile is not None
+        assert profile["tags"] == ["AI大模型", "编程开发"]
+        assert profile["top_n"] == 3
+        assert set(profile["sources"]) >= {"hnews", "infoq", "juejin", "rss:机器之心", "rss:阮一峰"}
+        cfg2 = load_config("config.yaml")  # config.yaml 已写回
+        assert cfg2.profile.enabled is True
+        assert cfg2.profile.top_n == 3
+        assert cfg2.profile.tags == ["AI大模型", "编程开发"]
+        assert "配置完成" in capsys.readouterr().out
+
+    # T-SETUP-10 幂等重跑
+    async def test_rerun_overwrites_single_row(self, tmp_path, monkeypatch):
+        cfg, storage = self._env(tmp_path, monkeypatch)
+        inputs = iter(["1", "", "5", "1", "", "4"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        assert await run_setup(cfg, storage, None) == 0
+        assert await run_setup(cfg, storage, None) == 0
+        rows = storage._conn.execute("SELECT COUNT(*) FROM user_profile").fetchone()[0]
+        assert rows == 1  # 第二次覆盖更新，仍单行
+        assert storage.load_profile()["tags"] == ["AI大模型"]
+        assert storage.load_profile()["top_n"] == 4
+
+    async def test_keyboard_interrupt_returns_130(self, tmp_path, monkeypatch, capsys):
+        cfg, storage = self._env(tmp_path, monkeypatch)
+
+        def _raise_kb(prompt=""):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("builtins.input", _raise_kb)
+        assert await run_setup(cfg, storage, None) == 130
+        assert "向导未完成" in capsys.readouterr().out
+        assert storage.load_profile() is None  # 未写库
+
+
+class TestSetupCmd:
+    """补充用例：setup 子命令解析与执行（cli.py 行为验证，不在覆盖率统计范围）。"""
+
+    def test_parser_has_setup_subcommand(self):
+        from daily_picks.cli import build_parser
+        args = build_parser().parse_args(["setup"])
+        assert args.command == "setup"
+
+    def test_cmd_setup_runs_wizard(self, tmp_path, monkeypatch, capsys):
+        from daily_picks import cli as cli_mod
+        monkeypatch.chdir(tmp_path)
+        write_default_config("config.yaml")
+        inputs = iter(["1", "", "3"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        assert cli_mod.cmd_setup(argparse.Namespace()) == 0
+        assert "配置完成" in capsys.readouterr().out
+        storage = Storage(tmp_path / "data" / "daily_picks.db")
+        assert storage.load_profile()["top_n"] == 3

@@ -25,6 +25,7 @@ from daily_picks.models import Article, PushResult, ScoredArticle
 from daily_picks.publisher import NoopPublisher, create_publisher
 from daily_picks.ranker import rank_and_pick, rule_score, select_candidates
 from daily_picks.scheduler import run_forever
+from daily_picks.setup import run_setup
 from daily_picks.sources import SourceAdapter, build_adapters
 from daily_picks.storage import Storage, StorageError
 from daily_picks.tracking import TrackingClient, TrackingError, sync_clicks
@@ -41,7 +42,7 @@ SOURCE_TIMEOUT_S = 30.0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """构建 argparse：init/run/serve/feedback/stats/test 六个子命令。"""
+    """构建 argparse：init/run/serve/setup/feedback/stats/test/track 八个子命令。"""
     parser = argparse.ArgumentParser(
         prog="daily-picks",
         description="每日精选（DailyPicks）：聚合 → 理解 → 决策 → 推送的个人内容 Agent",
@@ -61,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_feedback.add_argument("kind", choices=["like", "dislike"], help="反馈类型")
     p_feedback.add_argument("article_id", type=int, help="文章 id")
     p_feedback.add_argument("--keyword", help="附加关键词（文章未命中时用于调整权重）")
+
+    sub.add_parser("setup", help="v3 启动向导：标签/信息源/每日条数配置")
 
     p_stats = sub.add_parser("stats", help="统计报表：推送/token/成本")
     p_stats.add_argument("--days", type=int, default=7, help="统计最近 N 天（默认 7）")
@@ -104,6 +107,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
                   max_bytes=cfg.logging.max_bytes, backup_count=cfg.logging.backup_count)
     run_forever(cfg)
     return 0
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """setup 子命令（docs/05 §1.3）。无 LLM key → llm=None，降级为纯内置映射推荐。"""
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    storage = _open_storage(cfg)
+    llm = LLMClient(cfg.llm) if not _llm_key_missing(cfg) else None
+    return asyncio.run(run_setup(cfg, storage, llm))
 
 
 def cmd_feedback(args: argparse.Namespace) -> int:
@@ -525,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         "init": cmd_init,
         "run": cmd_run,
         "serve": cmd_serve,
+        "setup": cmd_setup,
         "feedback": cmd_feedback,
         "stats": cmd_stats,
         "test": cmd_test,
