@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import json as json_mod
 
 import pytest
 
+from daily_picks import cli as cli_mod
+from daily_picks.config import write_default_config
 from daily_picks.feedback import FEEDBACK_INTENTS, ParsedFeedback, apply_feedback, parse_feedback
 from daily_picks.feedback_channels import FeedbackChannel, HermesChannel, RawFeedback
 from daily_picks.llm import LLMError
@@ -218,3 +221,62 @@ class TestApplyFeedbackDispatch:
         aid = seed_article(tmp_db, title="今天天气不错", summary="晴转多云")
         result = apply_feedback(tmp_db, aid, "like", extra_keyword="开源")
         assert result["updated"] == ["开源"]
+
+
+class TestFeedbackCliRouting:
+    """T-FB-10/11 CLI 文字反馈路由：feedback "<文字>" 与 like/dislike <id> 共存（docs/05 §3.3）。"""
+
+    def _chdir(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        write_default_config("config.yaml")
+
+    def _seed(self, tmp_path):
+        from daily_picks.storage import Storage
+        (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+        storage = Storage(tmp_path / "data" / "daily_picks.db")
+        storage.init_schema()
+        aid = storage.upsert_articles([
+            Article(source="rss", source_key="k1", title="AI 编程工具实战",
+                    url="https://example.com/a")
+        ])[0]
+        storage.bump_keyword_weight("AI", 0)
+        return storage, aid
+
+    # T-FB-10 CLI 文字路由
+    def test_text_feedback_routes_to_text_path(self, tmp_path, monkeypatch, capsys):
+        self._chdir(tmp_path, monkeypatch)
+
+        async def fake_parse(raw, llm):
+            return ParsedFeedback(raw=raw, intent="expand", article_id=None,
+                                  tags=["AI硬件"], keywords=["AI硬件"], top_n=None)
+
+        monkeypatch.setattr(cli_mod, "parse_feedback", fake_parse)
+        args = argparse.Namespace(feedback_value=["多推点AI"], kind=None, keyword=None)
+        assert cli_mod.cmd_feedback(args) == 0
+        out = capsys.readouterr().out
+        assert "意图: expand" in out
+        from daily_picks.storage import Storage
+        storage = Storage(tmp_path / "data" / "daily_picks.db")
+        assert storage._conn.execute("SELECT COUNT(*) FROM feedback_text").fetchone()[0] == 1
+
+    # T-FB-11 CLI 原用法兼容
+    def test_like_42_keeps_v1_behavior(self, tmp_path, monkeypatch, capsys):
+        self._chdir(tmp_path, monkeypatch)
+        storage, aid = self._seed(tmp_path)
+        args = argparse.Namespace(feedback_value=["like", str(aid)], kind=None, keyword=None)
+        assert cli_mod.cmd_feedback(args) == 0
+        assert "已更新关键词权重: AI" in capsys.readouterr().out
+        assert storage.get_interest_weights()["AI"] == pytest.approx(1.1)
+
+    def test_kind_flag_with_id(self, tmp_path, monkeypatch, capsys):
+        self._chdir(tmp_path, monkeypatch)
+        storage, aid = self._seed(tmp_path)
+        args = argparse.Namespace(feedback_value=[str(aid)], kind="dislike", keyword=None)
+        assert cli_mod.cmd_feedback(args) == 0
+        assert storage.get_feedback_kinds(aid) == ["dislike"]
+
+    def test_no_args_prints_usage(self, tmp_path, monkeypatch, capsys):
+        self._chdir(tmp_path, monkeypatch)
+        args = argparse.Namespace(feedback_value=[], kind=None, keyword=None)
+        assert cli_mod.cmd_feedback(args) == 1
+        assert "用法" in capsys.readouterr().err

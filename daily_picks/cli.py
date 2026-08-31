@@ -20,7 +20,7 @@ from daily_picks.config import DEFAULT_CONFIG_PATH, ConfigError, RootConfig, loa
 from daily_picks.deep import DeepResult, deep_filter
 from daily_picks.digest import build_digest_text
 from daily_picks.digest_v3 import build_digest_v3
-from daily_picks.feedback import FeedbackError, apply_feedback
+from daily_picks.feedback import FeedbackError, apply_feedback, parse_feedback
 from daily_picks.llm import LLMClient, estimate_cost
 from daily_picks.log import setup_logging
 from daily_picks.models import Article, PushResult, ScoredArticle
@@ -60,9 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("serve", help="常驻调度（默认每天 08:00 执行）")
 
-    p_feedback = sub.add_parser("feedback", help="偏好反馈：like/dislike 调整关键词权重")
-    p_feedback.add_argument("kind", choices=["like", "dislike"], help="反馈类型")
-    p_feedback.add_argument("article_id", type=int, help="文章 id")
+    p_feedback = sub.add_parser("feedback", help="偏好反馈：like/dislike <id> 或文字反馈 <文字>（v3）")
+    p_feedback.add_argument("feedback_value", nargs="*",
+                            help="like/dislike 用法：kind + 文章 id；文字反馈：反馈原文")
+    p_feedback.add_argument("--kind", choices=["like", "dislike"],
+                            help="兼容显式指定反馈类型（可选）")
     p_feedback.add_argument("--keyword", help="附加关键词（文章未命中时用于调整权重）")
 
     sub.add_parser("setup", help="v3 启动向导：标签/信息源/每日条数配置")
@@ -119,24 +121,56 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return asyncio.run(run_setup(cfg, storage, llm))
 
 
-def cmd_feedback(args: argparse.Namespace) -> int:
-    """feedback 子命令：like|dislike <article_id> [--keyword]（设计文档 §10）。
-
-    找不到文章 → 退出码 1 + 提示；成功打印更新了哪些关键词权重。
+def _route_feedback(args: argparse.Namespace) -> tuple[str | None, str | None, int | None]:
+    """路由 feedback 参数（docs/05 §3.3）。返回 (kind, text, article_id)：
+    kind 非空 → 原 like/dislike 逻辑；text 非空 → 文字反馈路径。
+    兼容旧式 Namespace(kind=..., article_id=...)（tests/test_cli.py 既有用例）。
     """
+    values = list(getattr(args, "feedback_value", None) or [])
+    kind = getattr(args, "kind", None)
+    if kind is not None:
+        article_id = getattr(args, "article_id", None)
+        if isinstance(article_id, int):
+            return kind, None, article_id
+        if values and values[0].isdigit():
+            return kind, None, int(values[0])
+        return None, " ".join(values), None
+    if len(values) == 2 and values[0] in ("like", "dislike") and values[1].isdigit():
+        return values[0], None, int(values[1])
+    return None, " ".join(values) or None, None
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """feedback 子命令（docs/05 §3.3）：like/dislike <id> 走原逻辑；纯文字走 parse+apply。"""
+    kind, text, article_id = _route_feedback(args)
     cfg = load_config(DEFAULT_CONFIG_PATH)
     storage = _open_storage(cfg)
-    try:
-        result = apply_feedback(storage, args.article_id, args.kind, extra_keyword=args.keyword)
-    except FeedbackError as e:
-        print(f"反馈失败: {e}", file=sys.stderr)
+    if kind is not None:
+        try:
+            result = apply_feedback(storage, article_id, kind,
+                                    extra_keyword=getattr(args, "keyword", None))
+        except FeedbackError as e:
+            print(f"反馈失败: {e}", file=sys.stderr)
+            return 1
+        print(f"反馈已记录（{kind}）")
+        if result["updated"]:
+            print(f"已更新关键词权重: {', '.join(result['updated'])}")
+        else:
+            print("文章未命中任何关键词，权重未变化（like 可加 --keyword 指定附加关键词）")
+        print(f"文章 {article_id} 状态: {result['article_state']}")
+        return 0
+    if not text:
+        print('用法：daily-picks feedback like|dislike <文章id>  或  daily-picks feedback "<文字反馈>"',
+              file=sys.stderr)
         return 1
-    print(f"反馈已记录（{args.kind}）")
-    if result["updated"]:
-        print(f"已更新关键词权重: {', '.join(result['updated'])}")
-    else:
-        print("文章未命中任何关键词，权重未变化（like 可加 --keyword 指定附加关键词）")
-    print(f"文章 {args.article_id} 状态: {result['article_state']}")
+    llm = LLMClient(cfg.llm)
+    fb = asyncio.run(parse_feedback(text, llm))
+    apply_feedback(fb, storage, extract_keywords=cfg.feedback.extract_keywords)
+    print(f"文字反馈已记录（意图: {fb.intent}）")
+    if fb.tags:
+        print(f"新标签: {', '.join(fb.tags)}")
+    if fb.intent == "adjust" and fb.top_n:
+        print(f"每日条数已调整为 {fb.top_n} 条")
     return 0
 
 
