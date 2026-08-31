@@ -6,9 +6,10 @@ import json as json_mod
 
 import pytest
 
-from daily_picks.feedback import FEEDBACK_INTENTS, parse_feedback
+from daily_picks.feedback import FEEDBACK_INTENTS, ParsedFeedback, apply_feedback, parse_feedback
 from daily_picks.feedback_channels import FeedbackChannel, HermesChannel, RawFeedback
 from daily_picks.llm import LLMError
+from daily_picks.models import Article
 
 
 class TestFeedbackChannel:
@@ -104,3 +105,116 @@ class TestParseFeedback:
 
     def test_intents_constant(self):
         assert FEEDBACK_INTENTS == ("like", "dislike", "expand", "adjust", "none")
+
+
+def seed_article(storage, title: str = "AI 编程工具实战",
+                 summary: str = "用 AI 写代码的十个技巧") -> int:
+    ids = storage.upsert_articles([
+        Article(source="rss", source_key="k1", title=title,
+                url="https://example.com/post/1", summary=summary)
+    ])
+    return ids[0]
+
+
+def make_fb(intent: str, raw: str = "多推点AI硬件", article_id: int | None = None,
+            tags: list[str] | None = None, keywords: list[str] | None = None,
+            top_n: int | None = None) -> ParsedFeedback:
+    return ParsedFeedback(raw=raw, intent=intent, article_id=article_id,
+                          tags=tags or [], keywords=keywords or [], top_n=top_n)
+
+
+class TestApplyTextFeedback:
+    def _profile(self, tmp_db):
+        tmp_db.save_profile(["AI大模型"], ["hnews"], 5)
+
+    def _fb_rows(self, tmp_db):
+        return tmp_db._conn.execute("SELECT * FROM feedback_text").fetchall()
+
+    # T-FB-05 落库
+    def test_feedback_text_recorded(self, tmp_db):
+        apply_feedback(make_fb("none", raw="今天天气不错"), tmp_db)
+        rows = self._fb_rows(tmp_db)
+        assert len(rows) == 1
+        assert rows[0]["intent"] == "none"
+        assert rows[0]["channel"] == "hermes"
+        assert rows[0]["raw_text"] == "今天天气不错"
+
+    # T-FB-06 expand 写标签
+    def test_expand_writes_tag_weight(self, tmp_db):
+        apply_feedback(make_fb("expand", tags=["AI硬件"], keywords=["AI硬件"]), tmp_db)
+        assert dict(tmp_db.list_tags())["AI硬件"] == 1.5
+
+    def test_expand_existing_tag_keeps_weight(self, tmp_db):
+        tmp_db.save_tag_weight("AI硬件", 2.0, "click")
+        apply_feedback(make_fb("expand", tags=["AI硬件"], keywords=[]), tmp_db)
+        assert dict(tmp_db.list_tags())["AI硬件"] == 2.0  # 已有标签不动（保留演化值）
+
+    # T-FB-07 expand 合并进 profile
+    def test_expand_merges_into_profile(self, tmp_db):
+        self._profile(tmp_db)
+        apply_feedback(make_fb("expand", tags=["AI硬件"], keywords=["AI硬件"]), tmp_db)
+        assert tmp_db.load_profile()["tags"] == ["AI大模型", "AI硬件"]
+
+    # T-FB-08 adjust 更新 top_n（tags/sources 不变）
+    def test_adjust_updates_top_n_only(self, tmp_db):
+        self._profile(tmp_db)
+        apply_feedback(make_fb("adjust", top_n=3), tmp_db)
+        profile = tmp_db.load_profile()
+        assert profile["top_n"] == 3
+        assert profile["tags"] == ["AI大模型"]
+        assert profile["sources"] == ["hnews"]
+
+    def test_adjust_without_profile_is_noop(self, tmp_db):
+        apply_feedback(make_fb("adjust", top_n=3), tmp_db)
+        assert tmp_db.load_profile() is None  # 无画像不凭空造
+
+    # T-FB-09 关键词写权重
+    def test_keywords_bump_interest_weights(self, tmp_db):
+        tmp_db.bump_keyword_weight("AI硬件", 0)  # 预置 1.0
+        apply_feedback(make_fb("expand", tags=["AI硬件"], keywords=["AI硬件"]), tmp_db)
+        assert tmp_db.get_interest_weights()["AI硬件"] == pytest.approx(1.1)
+
+    def test_keywords_clamped_at_2(self, tmp_db):
+        tmp_db.bump_keyword_weight("AI硬件", 0)
+        for _ in range(20):
+            apply_feedback(make_fb("expand", tags=["AI硬件"], keywords=["AI硬件"]), tmp_db)
+        assert tmp_db.get_interest_weights()["AI硬件"] == 2.0
+
+    def test_extract_keywords_disabled(self, tmp_db):
+        tmp_db.bump_keyword_weight("AI硬件", 0)
+        apply_feedback(make_fb("expand", tags=["AI硬件"], keywords=["AI硬件"]),
+                       tmp_db, extract_keywords=False)
+        assert tmp_db.get_interest_weights()["AI硬件"] == 1.0  # 不写关键词
+
+    # like/dislike 文字路径（含 article_id）复用 v1 + tag 联动
+    def test_text_like_reuses_v1_and_bumps_tags(self, tmp_db):
+        tmp_db.bump_keyword_weight("AI", 0)
+        tmp_db.save_tag_weight("AI", 1.0, "manual")
+        aid = seed_article(tmp_db, title="AI 编程工具实战")
+        apply_feedback(make_fb("like", raw="这篇不错", article_id=aid), tmp_db)
+        assert tmp_db.get_feedback_kinds(aid) == ["like"]
+        assert tmp_db.get_interest_weights()["AI"] == pytest.approx(1.1)   # v1 like +0.1
+        assert dict(tmp_db.list_tags())["AI"] == pytest.approx(1.1)        # tag +0.1
+
+    def test_text_dislike_missing_article_no_crash(self, tmp_db):
+        apply_feedback(make_fb("dislike", raw="这篇不行", article_id=999), tmp_db)  # 不抛
+        rows = self._fb_rows(tmp_db)
+        assert len(rows) == 1  # 反馈文字仍落库
+
+
+class TestApplyFeedbackDispatch:
+    """分派器 v1 路径回归（对齐 tests/test_feedback.py 的既有断言）。"""
+
+    def test_v1_signature_still_works(self, tmp_db):
+        tmp_db.bump_keyword_weight("AI", 0)
+        aid = seed_article(tmp_db)
+        result = apply_feedback(tmp_db, aid, "like")
+        assert result["updated"] == ["AI"]
+        assert tmp_db.get_interest_weights()["AI"] == pytest.approx(1.1)
+
+    def test_v1_extra_keyword_still_works(self, tmp_db):
+        tmp_db.bump_keyword_weight("AI", 0)
+        # 注：与 test_feedback.py T-FBK-04 对齐，title+summary 均避开 "AI"（默认 summary 含 "AI" 会命中）
+        aid = seed_article(tmp_db, title="今天天气不错", summary="晴转多云")
+        result = apply_feedback(tmp_db, aid, "like", extra_keyword="开源")
+        assert result["updated"] == ["开源"]

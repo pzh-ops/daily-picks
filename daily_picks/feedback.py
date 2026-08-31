@@ -107,9 +107,9 @@ def _heuristic_feedback(raw: str) -> ParsedFeedback:
     return _fb("none")
 
 
-def apply_feedback(storage: Storage, article_id: int, kind: str,
-                   extra_keyword: str | None = None) -> dict:
-    """应用 like/dislike 反馈，返回 {'updated': [关键词...], 'article_state': 当前状态}。
+def _apply_like_dislike(storage: Storage, article_id: int, kind: str,
+                        extra_keyword: str | None = None) -> dict:
+    """应用 like/dislike 反馈，返回 {'updated': [关键词...], 'article_state': 当前状态}。（原 v1 实现，2026-08-31 更名）
 
     规则（设计文档 §10）：
     - like：命中关键词各 +0.1（上限 2.0）；无命中且给了 extra_keyword → 该词 +0.1 并入库。
@@ -151,3 +151,70 @@ def apply_feedback(storage: Storage, article_id: int, kind: str,
     logger.info("反馈已应用 article_id=%s kind=%s updated=%s state=%s",
                 article_id, kind, updated, article_state)
     return {"updated": updated, "article_state": article_state}
+
+
+# ---- v3 文字反馈应用（docs/04 §6.3 / docs/05 §3.2；同名分派见下）----
+
+
+def apply_feedback(first, second, third=True, extra_keyword=None, *, extract_keywords=None):
+    """同名分派（docs/04 §6.3 修订）：
+    - v3 文字反馈：apply_feedback(fb: ParsedFeedback, storage, extract_keywords=True)
+    - v1 like/dislike：apply_feedback(storage, article_id, kind, extra_keyword=None)
+    """
+    if isinstance(first, ParsedFeedback):
+        return _apply_text_feedback(
+            first, second,
+            extract_keywords=third if extract_keywords is None else extract_keywords,
+        )
+    return _apply_like_dislike(first, second, third, extra_keyword)
+
+
+def _bump_article_tags(storage: Storage, article_id: int, delta: float) -> list[str]:
+    """文章 title+summary 命中的标签（tag_weights 表中的）各 +delta（save_tag_weight 钳制 [0.2,2.0]）。"""
+    rows = storage.get_articles_by_ids([article_id])
+    if not rows:
+        return []
+    text = f"{rows[0]['title'] or ''} {rows[0]['summary'] or ''}".lower()
+    hits: list[str] = []
+    for tag, current in storage.list_tags():
+        if tag and tag.lower() in text:
+            storage.save_tag_weight(tag, current + delta, "feedback")
+            hits.append(tag)
+    return hits
+
+
+def _apply_text_feedback(fb: ParsedFeedback, storage: Storage,
+                         extract_keywords: bool = True) -> None:
+    """落库 feedback_text + 演化（docs/04 §6.3）：
+    - like/dislike + article_id：复用 v1 逻辑写 feedback 表；命中标签 ±0.1（tag_weights）
+    - expand：新标签写 tag_weights(1.5, 'feedback')（已存在的保留演化值），并合并进 user_profile.tags
+    - adjust：top_n 写 user_profile（保留原 tags/sources；无画像跳过）
+    - extract_keywords：keywords 写 interest_weights（+0.1，bump_keyword_weight 钳制 [0.2,2.0]）
+    """
+    storage.add_feedback_text(raw_text=fb.raw, intent=fb.intent, article_id=fb.article_id,
+                              extracted_tags=fb.tags, keywords=fb.keywords, channel="hermes")
+
+    profile = storage.load_profile()
+    existing_tags = profile["tags"] if profile else []
+    existing_sources = profile["sources"] if profile else []
+    existing_top_n = profile["top_n"] if profile else 5
+
+    if fb.intent in ("like", "dislike") and fb.article_id is not None:
+        try:
+            _apply_like_dislike(storage, fb.article_id, fb.intent)
+        except FeedbackError as e:
+            logger.warning("文字反馈关联文章不存在 article_id=%s: %s", fb.article_id, e)
+        _bump_article_tags(storage, fb.article_id, 0.1 if fb.intent == "like" else -0.1)
+    elif fb.intent == "expand":
+        existing_tag_weights = dict(storage.list_tags())
+        for tag in fb.tags:
+            if tag and tag not in existing_tag_weights:
+                storage.save_tag_weight(tag, 1.5, "feedback")
+        merged_tags = list(dict.fromkeys(existing_tags + fb.tags))
+        storage.save_profile(merged_tags, existing_sources, existing_top_n)
+    elif fb.intent == "adjust" and fb.top_n is not None and profile is not None:
+        storage.save_profile(existing_tags, existing_sources, fb.top_n)
+
+    if extract_keywords:
+        for kw in fb.keywords:
+            storage.bump_keyword_weight(kw, 0.1)

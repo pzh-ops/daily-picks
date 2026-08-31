@@ -421,6 +421,22 @@ class Storage:
             result.append(item)
         return result
 
+    def add_feedback_text(self, *, raw_text: str, intent: str, article_id: int | None,
+                          extracted_tags: list[str], keywords: list[str],
+                          channel: str = "hermes") -> int:
+        """插入 feedback_text（docs/04 §4）；intent 非法抛 StorageError。返回新行 id。"""
+        if intent not in ("like", "dislike", "expand", "adjust", "none"):
+            raise StorageError(f"非法 intent: {intent!r}")
+        with self._lock:
+            cur = self._execute(
+                "INSERT INTO feedback_text (raw_text, intent, article_id, extracted_tags, keywords, channel)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (raw_text, intent, article_id,
+                 json.dumps(extracted_tags, ensure_ascii=False),
+                 json.dumps(keywords, ensure_ascii=False), channel),
+            )
+            return int(cur.lastrowid)
+
     # ---- 点击追踪（设计文档 §15.5）----
 
     CLICK_CURSOR_KEY = "last_click_sync_id"
