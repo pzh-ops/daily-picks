@@ -424,7 +424,7 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
         storage.update_score(row["id"], score)
         scored.append(ScoredArticle(article=article, score=score, article_id=row["id"]))
 
-    candidates = select_candidates(scored, cfg.digest.max_candidates)
+    candidates = select_candidates(scored, cfg.digest.max_candidates, cfg.digest.min_score)
     llm_client = LLMClient(cfg.llm)
     if _llm_key_missing(cfg):
         print("未配置 DEEPSEEK_API_KEY，使用规则分降级")

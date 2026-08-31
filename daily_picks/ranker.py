@@ -45,19 +45,28 @@ def rule_score(article: Article, weights: dict[str, float], now: datetime,
     return keyword_score + source_weight + recency_bonus + feedback_bias
 
 
-def select_candidates(articles: list[ScoredArticle], max_candidates: int) -> list[ScoredArticle]:
-    """降序取前 max_candidates；若全部 0 分 → 每源最高分 1 条作为候选（保底策略）。"""
-    ordered = sorted(articles, key=lambda sa: sa.score, reverse=True)
-    if not ordered:
+def select_candidates(articles: list[ScoredArticle], max_candidates: int,
+                      min_score: float = 0.0) -> list[ScoredArticle]:
+    """降序取前 max_candidates；若全部 0 分 → 每源最高分 1 条作为候选（保底策略，不受 min_score 限制）。
+
+    min_score > 0 时，规则分低于该值的候选不参与（保底策略除外，设计文档 §11）；
+    若过滤后为空（min_score 设置过高），回退为不过滤并告警，保证 LLM 有材料可选。
+    """
+    if not articles:
         return []
-    if all(sa.score == 0.0 for sa in ordered):
+    if all(sa.score == 0.0 for sa in articles):
         # 保底：无关键词命中时，每源取分数最高的 1 条，保证 LLM 有材料可选
         best_per_source: dict[str, ScoredArticle] = {}
-        for sa in ordered:
+        for sa in articles:
             current = best_per_source.get(sa.article.source)
             if current is None or sa.score > current.score:
                 best_per_source[sa.article.source] = sa
         return sorted(best_per_source.values(), key=lambda sa: sa.score, reverse=True)[:max_candidates]
+    filtered = [sa for sa in articles if sa.score >= min_score] if min_score > 0.0 else list(articles)
+    if not filtered:
+        logger.warning("min_score=%.2f 过滤后候选为空，回退为不过滤（请检查配置）", min_score)
+        filtered = list(articles)
+    ordered = sorted(filtered, key=lambda sa: sa.score, reverse=True)
     return ordered[:max_candidates]
 
 

@@ -103,6 +103,38 @@ class TestSelectCandidates:
     def test_empty_list(self):
         assert select_candidates([], 40) == []
 
+    # T-RANK-13（min_score 生效，2026-08-31 修复 D-03）
+    def test_min_score_filters_below_threshold(self):
+        scored = [make_scored(article_id=i, title=f"t{i}", score=float(i)) for i in range(1, 6)]
+        result = select_candidates(scored, 40, min_score=3.0)
+        assert [sa.article_id for sa in result] == [5, 4, 3]  # 3.0 及以上
+        assert all(sa.score >= 3.0 for sa in result)
+
+    def test_min_score_inclusive_boundary(self):
+        scored = [make_scored(article_id=1, score=3.0), make_scored(article_id=2, score=2.9)]
+        result = select_candidates(scored, 40, min_score=3.0)
+        assert [sa.article_id for sa in result] == [1]  # == 阈值保留，< 剔除
+
+    def test_min_score_zero_is_noop(self):
+        scored = [make_scored(article_id=i, title=f"t{i}", score=float(i)) for i in range(1, 6)]
+        assert len(select_candidates(scored, 40, min_score=0.0)) == 5  # 与默认行为一致
+
+    def test_min_score_fallback_ignores_threshold(self):
+        # 全部 0 分触发保底策略，即使 min_score > 0 也返回每源 1 条
+        scored = [
+            make_scored(source="rss", article_id=1),
+            make_scored(source="zhihu", article_id=2),
+        ]
+        result = select_candidates(scored, 40, min_score=5.0)
+        assert len(result) == 2
+
+    def test_min_score_overfilter_returns_unfiltered(self, caplog):
+        # 过滤后为空（min_score 过高）→ 回退不过滤并告警，LLM 仍有材料
+        scored = [make_scored(article_id=1, score=1.0), make_scored(article_id=2, score=2.0)]
+        result = select_candidates(scored, 40, min_score=10.0)
+        assert len(result) == 2
+        assert any("回退为不过滤" in r.message for r in caplog.records)
+
 
 class TestRankAndPick:
     def _candidates(self, n: int = 12) -> list[ScoredArticle]:
