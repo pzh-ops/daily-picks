@@ -106,7 +106,11 @@ async def _llm_recommend(tags: list[str], llm: LLMClient, storage: Storage) -> l
     if not isinstance(data, dict):
         return []
     keys: list[str] = []
-    for item in data.get("sources", [])[: len(tags) * 3]:
+    sources_raw = data.get("sources")
+    if not isinstance(sources_raw, list):
+        logger.warning("LLM 推荐源输出格式非法（sources 非列表），跳过: %r", sources_raw)
+        return []
+    for item in sources_raw[: len(tags) * 3]:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name", "")).strip()
