@@ -20,7 +20,7 @@ from daily_picks.config import DEFAULT_CONFIG_PATH, ConfigError, RootConfig, loa
 from daily_picks.deep import DeepResult, deep_filter
 from daily_picks.digest import build_digest_text
 from daily_picks.digest_v3 import build_digest_v3
-from daily_picks.feedback import FeedbackError, apply_feedback, parse_feedback
+from daily_picks.feedback import FeedbackError, apply_feedback, evolve_weights, parse_feedback
 from daily_picks.llm import LLMClient, estimate_cost
 from daily_picks.log import setup_logging
 from daily_picks.models import Article, PushResult, ScoredArticle
@@ -190,6 +190,14 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(f"  Token 输出: {stats['tokens_out']}")
     print(f"  成本(USD):  ${cost_usd:.6f}")
     print(f"  成本(CNY):  ¥{cost_usd * USD_TO_CNY:.4f}（按 1 USD = {USD_TO_CNY:g} CNY 估算）")
+    v3 = storage.get_v3_counts()
+    print("v3 深度精选:")
+    print(f"  文字反馈: {v3['feedback_text']} 条")
+    print(f"  标签权重: {v3['tag_weights']} 条")
+    if v3["profile_configured"]:
+        print(f"  用户画像: 已配置（每日 {v3['top_n']} 条）")
+    else:
+        print("  用户画像: 未配置（运行 daily-picks setup）")
     return 0
 
 
@@ -448,6 +456,13 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
             print(f"点击同步：拉取 {sync_result['synced']} 条，回写权重 {sync_result['applied']} 条")
         except (TrackingError, StorageError) as e:
             logger.warning("点击同步失败（不影响主流程）: %s", e)
+
+    # 步骤 5.6（v3）：权重演化（docs/05 §4.1，采集后打分前）。失败只记日志，不阻塞主流程。
+    if cfg.profile.enabled:
+        try:
+            evolve_weights(storage)
+        except StorageError as e:
+            logger.warning("权重演化失败（不影响主流程）: %s", e)
 
     # 步骤 6：weights = storage.get_interest_weights() 合并 config 关键词
     # （语义：config.interests.keywords 优先，同名词以 config 权重为准；表中独有的词追加）

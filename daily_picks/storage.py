@@ -531,3 +531,19 @@ class Storage:
             except sqlite3.Error as e:
                 raise StorageError(f"统计 clicks 失败: {e}") from e
         return int(row[0])
+
+    def get_v3_counts(self) -> dict:
+        """v3 计数（stats 输出，docs/05 §4.2）：feedback_text/tag_weights 行数 + user_profile 状态。"""
+        profile = self.load_profile()
+        with self._lock:
+            try:
+                fb_row = self._conn.execute("SELECT COUNT(*) FROM feedback_text").fetchone()
+                tag_row = self._conn.execute("SELECT COUNT(*) FROM tag_weights").fetchone()
+            except sqlite3.Error as e:
+                raise StorageError(f"统计 v3 数据失败: {e}") from e
+        return {
+            "feedback_text": int(fb_row[0]),
+            "tag_weights": int(tag_row[0]),
+            "profile_configured": profile is not None,
+            "top_n": profile["top_n"] if profile else None,
+        }
