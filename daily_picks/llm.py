@@ -158,6 +158,17 @@ class LLMClient:
                            tokens_in, tokens_out, (result.raw_text or "")[:300])
         return result
 
+    async def chat(self, system: str, user: str, json_mode: bool = True) -> str:
+        """通用单轮 chat（docs/05 §0）：返回 choices[0].message.content；
+        json_mode 时剥离 ```json 围栏。网络/密钥异常抛 LLMError（调用方 fail-open）。"""
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        data = await self._chat(messages)
+        content = _extract_content(data)
+        return _strip_fences(content) if json_mode else content
+
     async def _chat(self, messages: list[dict], **kw) -> dict:
         """POST {base_url}/chat/completions；5xx/429/超时重试 3 次；4xx 不重试直接抛 LLMError。
 
