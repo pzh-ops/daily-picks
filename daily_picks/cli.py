@@ -17,7 +17,9 @@ import httpx
 
 from daily_picks import __version__
 from daily_picks.config import DEFAULT_CONFIG_PATH, ConfigError, RootConfig, load_config, write_default_config
+from daily_picks.deep import DeepResult, deep_filter
 from daily_picks.digest import build_digest_text
+from daily_picks.digest_v3 import build_digest_v3
 from daily_picks.feedback import FeedbackError, apply_feedback
 from daily_picks.llm import LLMClient, estimate_cost
 from daily_picks.log import setup_logging
@@ -435,13 +437,27 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
         storage.update_score(row["id"], score)
         scored.append(ScoredArticle(article=article, score=score, article_id=row["id"]))
 
-    candidates = select_candidates(scored, cfg.digest.max_candidates, cfg.digest.min_score)
     llm_client = LLMClient(cfg.llm)
-    if _llm_key_missing(cfg):
+    key_missing = _llm_key_missing(cfg)
+    if key_missing:
         print("未配置 DEEPSEEK_API_KEY，使用规则分降级")
         logger.warning("未配置 DEEPSEEK_API_KEY，使用规则分降级")
+
+    # 步骤 7.5（v3）：deep 阶段（docs/04 §3.1）。profile.enabled 且有 key 时，对规则分
+    # Top-N（deep_candidates）执行深度评分并过滤低于 deep_threshold 的候选；
+    # 无 key 时跳过 deep（等同 v2 选材，docs/04 §10 降级表）。
+    top_n = cfg.profile.top_n if cfg.profile.enabled else cfg.digest.top_n
+    deep_map_full: dict[int, DeepResult] = {}
+    if cfg.profile.enabled and not key_missing:
+        top_for_deep = sorted(scored, key=lambda sa: sa.score, reverse=True)[: cfg.profile.deep_candidates]
+        candidates, deep_results = await deep_filter(
+            top_for_deep, llm_client, cfg.profile.deep_threshold, weights)
+        deep_map_full = {d.article_id: d for d in deep_results}
+    else:
+        candidates = select_candidates(scored, cfg.digest.max_candidates, cfg.digest.min_score)
+
     picks, fallback_used = await rank_and_pick(
-        candidates, llm_client, weights, cfg.digest.top_n, cfg.llm.max_input_chars
+        candidates, llm_client, weights, top_n, cfg.llm.max_input_chars
     )
 
     by_id = {sa.article_id: sa for sa in scored}
@@ -464,18 +480,31 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
             except Exception as e:  # noqa: BLE001 —— 追踪失败不得阻塞主流程
                 logger.warning("短链注册失败（使用原始链接）: %s", e)
 
-    # 步骤 8：生成微信 markdown 简报（设计文档 §8；items = (rank, article, reason)）
-    digest_items: list[tuple[int, Article, str]] = []
-    for pick in picks:
-        picked = by_id.get(pick.article_id)
-        if picked is None:
-            logger.warning("精选条目无对应文章 article_id=%s，跳过", pick.article_id)
-            continue
-        article = picked.article
-        if pick.article_id in url_map:
-            article = dataclasses.replace(article, url=url_map[pick.article_id])
-        digest_items.append((pick.rank, article, pick.reason))
-    digest_text = build_digest_text(digest_items, run_date)
+    # 步骤 8：生成微信 markdown 简报（docs/04 §7；profile.enabled 时走 v3 模板）
+    if cfg.profile.enabled:
+        articles_by_id: dict[int, Article] = {}
+        for pick in picks:
+            picked = by_id.get(pick.article_id)
+            if picked is None:
+                logger.warning("精选条目无对应文章 article_id=%s，跳过", pick.article_id)
+                continue
+            article = picked.article
+            if pick.article_id in url_map:
+                article = dataclasses.replace(article, url=url_map[pick.article_id])
+            articles_by_id[pick.article_id] = article
+        digest_text = build_digest_v3(picks, articles_by_id, deep_map_full)
+    else:
+        digest_items: list[tuple[int, Article, str]] = []
+        for pick in picks:
+            picked = by_id.get(pick.article_id)
+            if picked is None:
+                logger.warning("精选条目无对应文章 article_id=%s，跳过", pick.article_id)
+                continue
+            article = picked.article
+            if pick.article_id in url_map:
+                article = dataclasses.replace(article, url=url_map[pick.article_id])
+            digest_items.append((pick.rank, article, pick.reason))
+        digest_text = build_digest_text(digest_items, run_date)
 
     # 步骤 9：推送。dry-run → NoopPublisher 写 dry_run_file；幂等：当日已推送则跳过 webhook（设计文档 §5）
     prev_run = storage.get_digest_run(run_id)

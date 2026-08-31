@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 
 from daily_picks import deep as deep_mod
-from daily_picks.deep import DeepResult, deep_analyze, deep_filter, format_keywords
+from daily_picks.deep import deep_analyze, deep_filter, format_keywords
 from daily_picks.models import Article, ScoredArticle
 
 
@@ -167,3 +166,89 @@ class TestFormatKeywords:
         assert format_keywords(["A", "B", "C"]) == "A、B、C"
         assert format_keywords([]) == ""
     # T-DEEP-10（模板兜底摘要）渲染断言在 tests/test_digest_v3.py::TestBuildDigestV3::test_missing_deep_falls_back_to_summary
+
+
+# ---- v3 run_once 集成（对齐 tests/test_e2e.py 的 respx mock 写法；cli.py 不在覆盖率范围，验证行为）----
+
+import json as json_mod
+from pathlib import Path
+
+import httpx
+
+from daily_picks.cli import run_once
+
+RSS_URL = "https://sspai.com/feed"
+RSS_URL2 = "https://www.ruanyifeng.com/blog/atom.xml"
+BILI_URL = "https://api.bilibili.com/x/web-interface/popular"
+ZHIHU_URL = "https://api.zhihu.com/topstory/hot-lists/total"
+JUEJIN_URL = "https://api.juejin.cn/recommend_api/v1/article/recommend_all_feed"
+HN_URL = "https://hn.algolia.com/api/v1/search"
+INFOQ_URL = "https://www.infoq.cn/feed"
+LLM_URL = "https://api.deepseek.com/chat/completions"
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def load(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+def mock_sources(mock_http) -> None:
+    mock_http.get(RSS_URL).mock(return_value=httpx.Response(200, content=load("rss_sample.xml")))
+    mock_http.get(RSS_URL2).mock(return_value=httpx.Response(200, content=load("rss_sample.xml")))
+    mock_http.get(BILI_URL).mock(
+        return_value=httpx.Response(200, json=json_mod.loads(load("bilibili_sample.json"))))
+    mock_http.get(ZHIHU_URL).mock(
+        return_value=httpx.Response(200, json=json_mod.loads(load("zhihu_sample.json"))))
+    mock_http.post(JUEJIN_URL).mock(
+        return_value=httpx.Response(200, json=json_mod.loads(load("juejin_sample.json"))))
+    mock_http.get(HN_URL).mock(
+        return_value=httpx.Response(200, json=json_mod.loads(load("hnews_sample.json"))))
+    mock_http.get(INFOQ_URL).mock(return_value=httpx.Response(200, content=load("infoq_sample.xml")))
+
+
+def llm_reply(content: str) -> httpx.Response:
+    return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+
+DEEP_JSON = ('{"deep_score": 70, "keywords": ["AI", "大模型", "深度思考"],'
+             ' "reason": "文章用具体数据对比了三种方案的落地成本，缓存实测尤其有参考价值。"}')
+RANK_JSON = ('{"picks": [{"article_id": 1, "rank": 1, "reason": "AI主题深度"},'
+             ' {"article_id": 2, "rank": 2, "reason": "工具链实测"},'
+             ' {"article_id": 3, "rank": 3, "reason": "架构演进"}]}')
+
+
+class TestRunOnceV3:
+    async def test_v3_deep_path_outputs_v3_digest(self, sample_config, tmp_path, mock_http,
+                                                  frozen_now, monkeypatch):
+        cfg = sample_config
+        cfg.push.dry_run_file = str(tmp_path / "logs" / "last_digest.md")
+        cfg.profile.enabled = True
+        cfg.profile.top_n = 3
+        cfg.profile.deep_threshold = 60
+        cfg.profile.deep_candidates = 40
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        mock_sources(mock_http)
+        # 8 篇新文章 → 8 次 deep chat + 1 次 rank chat（respx 按序出队）
+        mock_http.post(LLM_URL).mock(side_effect=[llm_reply(DEEP_JSON)] * 8 + [llm_reply(RANK_JSON)])
+
+        assert await run_once(cfg, dry_run=True) == 0
+        text = Path(cfg.push.dry_run_file).read_text(encoding="utf-8")
+        assert text.startswith("📚 今日深度精选（3条）")
+        assert "关键词：AI、大模型、深度思考" in text
+        assert "推荐理由：文章用具体数据" in text
+        assert text.count("关键词：") == 3
+
+    async def test_v3_no_key_skips_deep(self, sample_config, tmp_path, mock_http,
+                                        frozen_now, monkeypatch):
+        cfg = sample_config
+        cfg.push.dry_run_file = str(tmp_path / "logs" / "last_digest.md")
+        cfg.profile.enabled = True
+        cfg.profile.top_n = 3
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)  # 确保无 key（本地 .env 可能注入真实 key）
+        mock_sources(mock_http)
+        # 无 DEEPSEEK_API_KEY：deep 跳过，等同 v2 降级；LLM 端点不应被调用
+        assert await run_once(cfg, dry_run=True) == 0
+        text = Path(cfg.push.dry_run_file).read_text(encoding="utf-8")
+        assert "📚 今日深度精选" in text  # 模板仍是 v3（profile.enabled）
+        assert "摘要：" in text or "今日无精选内容" in text  # deep 缺位 → 摘要兜底
