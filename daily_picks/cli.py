@@ -437,7 +437,7 @@ async def run_once(cfg: RootConfig, dry_run: bool = False) -> int:
     logger.info("开始采集 run_id=%s run_date=%s", run_id, run_date)
 
     # 步骤 4：并发采集（asyncio.gather + 每源 asyncio.wait_for 30s 超时，单源失败隔离）
-    adapters = build_adapters(cfg)
+    adapters = build_adapters(cfg, storage)
     collected, stats = await _collect(adapters, cfg)
 
     # 步骤 5：去重入库（返回新入库 id；新文章构 ScoredArticle 打分在 M2 步骤 4/7）

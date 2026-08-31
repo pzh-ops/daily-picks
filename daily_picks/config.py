@@ -42,7 +42,7 @@ class ProfileConfig(BaseModel):
     enabled: bool = False          # v3 默认关，setup 向导后开
     top_n: int = 5
     deep_threshold: int = 60
-    deep_candidates: int = 40
+    deep_candidates: int = 20
     tags: list[str] = []
     sources: list[str] = []
 
@@ -164,7 +164,7 @@ profile:
   enabled: false            # v3 深度精选开关；setup 向导完成后自动置 true
   top_n: 5                  # 每日推送条数（1-10）
   deep_threshold: 60        # 深度评分阈值（0-100），低于此值不推送
-  deep_candidates: 40       # deep 阶段最多评分的候选数（LLM 成本控制）
+  deep_candidates: 20       # deep 阶段最多评分的候选数（LLM 成本控制；8/31 实测调至 20）
   tags: []                  # setup 写入（JSON 数组，实际存 user_profile 表）
   sources: []               # setup 写入
 

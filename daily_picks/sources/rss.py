@@ -22,11 +22,17 @@ class RssAdapter(SourceAdapter):
 
     name = "rss"
 
+    def __init__(self, extra_urls: list[str] | None = None):
+        """extra_urls：source_registry 注册的 rss 源（v3 setup 向导产物），
+        与 config.yaml rss.urls 并集采集（docs/04 §6.5）。"""
+        self.extra_urls = extra_urls or []
+
     async def fetch(self, cfg: SourceSection, client: httpx.AsyncClient) -> list[Article]:
         """逐 URL 拉取；单个 URL 失败 continue（§4.5）；条目级清洗失败只跳过该条。"""
         self.source_errors = 0
         articles: list[Article] = []
-        for url in cfg.urls:
+        urls = list(dict.fromkeys(list(cfg.urls) + self.extra_urls))  # 并集去重保序
+        for url in urls:
             try:
                 r = await client.get(url, headers={"User-Agent": UA})
                 r.raise_for_status()

@@ -15,7 +15,7 @@ logger = logging.getLogger("daily_picks.deep")
 DEEP_SCORE_MIN: float = 0.0    # LLM 深度评分（0-100）输出下限校验
 KEYWORDS_MIN: int = 3
 KEYWORDS_MAX: int = 5
-DEEP_TIMEOUT_S: float = 30.0   # 单篇分析超时秒数（docs/05 §2.1）
+DEEP_TIMEOUT_S: float = 60.0   # 单篇分析超时秒数（docs/05 §2.1；8/31 实测 30s 超时率高，调至 60）
 DEEP_MIN_COUNT: int = 5        # 过滤后不足该数触发降阈值重试（对齐 profile.top_n 默认值，docs/04 §6.2 修订）
 
 # 推荐理由禁用词（docs/04 §7，写死在代码侧校验）

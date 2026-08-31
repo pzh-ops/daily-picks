@@ -6,6 +6,7 @@ import logging
 
 from daily_picks.config import RootConfig
 from daily_picks.sources.base import SourceAdapter, SourceError
+from daily_picks.storage import Storage  # 仅类型标注（registry 驱动采集，docs/04 §6.5）
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +45,29 @@ __all__ = [
 ]
 
 
-def build_adapters(cfg: RootConfig) -> list[SourceAdapter]:
-    """按 cfg.sources.enabled 顺序实例化；未知名字记 WARNING 并跳过。"""
+def build_adapters(cfg: RootConfig, storage: Storage | None = None) -> list[SourceAdapter]:
+    """按 cfg.sources.enabled 顺序实例化；未知名字记 WARNING 并跳过。
+
+    storage 非空时（v3）：读取 source_registry 中 kind='rss' 且 enabled=1 的 url，
+    作为 RssAdapter 的 extra_urls（docs/04 §6.5 registry 驱动采集）。
+    """
     adapters: list[SourceAdapter] = []
+    registry_urls: list[str] = []
+    if storage is not None:
+        try:
+            registry_urls = [
+                s["url"] for s in storage.list_sources(enabled_only=True)
+                if s.get("kind") == "rss" and s.get("url")
+            ]
+        except Exception:  # noqa: BLE001 — registry 读取失败不阻断采集（fail-open）
+            logger.warning("source_registry 读取失败，本次采集忽略注册源")
     for name in cfg.sources.enabled:
         cls = _ADAPTER_REGISTRY.get(name)
         if cls is None:
             logger.warning("内容源 %r 未注册，已跳过", name)
             continue
-        adapters.append(cls())
+        if name == "rss":
+            adapters.append(cls(extra_urls=registry_urls))
+        else:
+            adapters.append(cls())
     return adapters

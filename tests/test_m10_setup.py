@@ -30,7 +30,7 @@ class TestV3Config:
         assert cfg.profile.enabled is False
         assert cfg.profile.top_n == 5
         assert cfg.profile.deep_threshold == 60
-        assert cfg.profile.deep_candidates == 40
+        assert cfg.profile.deep_candidates == 20  # 8/31 调参
         assert cfg.feedback.channel == "hermes"
         assert cfg.feedback.extract_keywords is True
 
@@ -313,3 +313,62 @@ class TestSetupCmd:
         assert "配置完成" in capsys.readouterr().out
         storage = Storage(tmp_path / "data" / "daily_picks.db")
         assert storage.load_profile()["top_n"] == 3
+
+
+class TestRegistryDrivenCollect:
+    """registry 驱动采集（D-07 补做，docs/04 §6.5）：setup 注册的 rss 源合并进采集。"""
+
+    def _cfg_with_rss(self):
+        from daily_picks.config import RootConfig, SourceSection
+        cfg = RootConfig()
+        cfg.sources.enabled = ["rss", "hnews"]
+        cfg.sources.rss = SourceSection(urls=["https://cfg.example.com/feed"])
+        return cfg
+
+    def test_build_adapters_merges_registry_urls(self, tmp_path):
+        from daily_picks.sources import build_adapters
+        from daily_picks.sources.rss import RssAdapter
+        storage = Storage(tmp_path / "t.db")
+        storage.init_schema()
+        storage.register_source("rss:测试源", "测试源", "https://reg.example.com/rss", ["AI大模型"])
+        adapters = build_adapters(self._cfg_with_rss(), storage)
+        rss = next(a for a in adapters if isinstance(a, RssAdapter))
+        assert rss.extra_urls == ["https://reg.example.com/rss"]
+
+    def test_build_adapters_without_storage_no_extra(self):
+        from daily_picks.sources import build_adapters
+        from daily_picks.sources.rss import RssAdapter
+        adapters = build_adapters(self._cfg_with_rss())
+        rss = next(a for a in adapters if isinstance(a, RssAdapter))
+        assert rss.extra_urls == []
+
+    def test_build_adapters_ignores_disabled(self, tmp_path):
+        from daily_picks.sources import build_adapters
+        from daily_picks.sources.rss import RssAdapter
+        storage = Storage(tmp_path / "t.db")
+        storage.init_schema()
+        storage.register_source("rss:启用", "启用", "https://on.example.com/rss", [])
+        storage.register_source("rss:禁用", "禁用", "https://off.example.com/rss", [])
+        conn = storage._conn
+        conn.execute("UPDATE source_registry SET enabled=0 WHERE key='rss:禁用'")
+        conn.commit()
+        adapters = build_adapters(self._cfg_with_rss(), storage)
+        rss = next(a for a in adapters if isinstance(a, RssAdapter))
+        assert rss.extra_urls == ["https://on.example.com/rss"]
+
+    def test_fetch_uses_union_dedup(self, tmp_path, monkeypatch):
+        """fetch 时 config.urls 与 extra_urls 并集去重（保序）。"""
+        from daily_picks.sources.rss import RssAdapter
+        adapter = RssAdapter(extra_urls=["https://b.example.com/feed", "https://a.example.com/feed"])
+        seen: list[str] = []
+        import httpx
+        class FakeClient:
+            async def get(self, url, **kw):
+                seen.append(url)
+                resp = httpx.Response(200, text="<rss><channel><title>t</title></channel></rss>")
+                return resp
+        cfg = self._cfg_with_rss().sources.rss
+        cfg.urls = ["https://a.example.com/feed", "https://c.example.com/feed"]
+        import asyncio
+        asyncio.run(adapter.fetch(cfg, FakeClient()))
+        assert seen == ["https://a.example.com/feed", "https://c.example.com/feed", "https://b.example.com/feed"]
