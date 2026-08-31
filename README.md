@@ -252,6 +252,9 @@ feedback:
 `profile.enabled` 是 v3/v2 切换开关：`false` = 完全 v2 行为（规则打分 → LLM 精排 → 原简报
 模板，不走 deep 阶段、不用 v3 模板），老配置零影响；`true` = v3 深度精选流程。
 
+> 注意：setup 向导选择的来源暂不驱动采集；采集源以 config.yaml `sources.rss.urls` 为准
+> （registry 驱动采集为延期项）。
+
 ### 查看 v3 状态
 
 ```bash
