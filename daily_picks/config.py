@@ -37,6 +37,22 @@ class DigestConfig(BaseModel):
     min_score: float = 0.0
 
 
+class ProfileConfig(BaseModel):
+    """v3 深度精选配置（docs/04 §5）。enabled=False 时完全走 v2 行为。"""
+    enabled: bool = False          # v3 默认关，setup 向导后开
+    top_n: int = 5
+    deep_threshold: int = 60
+    deep_candidates: int = 40
+    tags: list[str] = []
+    sources: list[str] = []
+
+
+class FeedbackConfig(BaseModel):
+    """v3 文字反馈配置（docs/04 §5）。"""
+    channel: str = "hermes"        # 'hermes'（本期）| 'wecom'（后期）
+    extract_keywords: bool = True
+
+
 class LLMConfig(BaseSettings):
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-v4-pro"
@@ -124,6 +140,8 @@ class RootConfig(BaseModel):
     sources: SourcesConfig = SourcesConfig()
     push: PushConfig = PushConfig()
     tracking: TrackingConfig = TrackingConfig()
+    profile: ProfileConfig = ProfileConfig()
+    feedback: FeedbackConfig = FeedbackConfig()
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
 
@@ -141,6 +159,18 @@ digest:
   top_n: 10                  # 精选条数
   max_candidates: 40         # 送 LLM 精排的候选上限
   min_score: 0.0             # 规则分低于此值不参与（保底策略除外）
+
+profile:
+  enabled: false            # v3 深度精选开关；setup 向导完成后自动置 true
+  top_n: 5                  # 每日推送条数（1-10）
+  deep_threshold: 60        # 深度评分阈值（0-100），低于此值不推送
+  deep_candidates: 40       # deep 阶段最多评分的候选数（LLM 成本控制）
+  tags: []                  # setup 写入（JSON 数组，实际存 user_profile 表）
+  sources: []               # setup 写入
+
+feedback:
+  channel: hermes           # 'hermes'（本期）| 'wecom'（后期）
+  extract_keywords: true    # 反馈文字是否提取关键词写入 interest_weights
 
 llm:
   base_url: https://api.deepseek.com
@@ -268,6 +298,14 @@ def _validate(cfg: RootConfig) -> None:
         raise ConfigError(
             f"tracking.base_url 必须以 http:// 或 https:// 开头: {cfg.tracking.base_url!r}"
         )
+    if not 1 <= cfg.profile.top_n <= 10:
+        raise ConfigError(f"profile.top_n 越界: {cfg.profile.top_n}（要求 1-10）")
+    if not 0 <= cfg.profile.deep_threshold <= 100:
+        raise ConfigError(f"profile.deep_threshold 越界: {cfg.profile.deep_threshold}（要求 0-100）")
+    if cfg.profile.deep_candidates < 1:
+        raise ConfigError(f"profile.deep_candidates 必须 >= 1: {cfg.profile.deep_candidates}")
+    if cfg.feedback.channel not in {"hermes", "wecom"}:
+        raise ConfigError(f"feedback.channel 非法: {cfg.feedback.channel!r}（可选 hermes | wecom）")
 
 
 def load_config(path: str = DEFAULT_CONFIG_PATH) -> RootConfig:
@@ -296,3 +334,11 @@ def write_default_config(path: str) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(DEFAULT_YAML, encoding="utf-8")
+
+
+def save_config(cfg: RootConfig, path: str = DEFAULT_CONFIG_PATH) -> None:
+    """把 RootConfig 写回 YAML（docs/05 §1.1，setup 向导持久化配置用）。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(yaml.safe_dump(cfg.model_dump(), allow_unicode=True, sort_keys=False),
+                 encoding="utf-8")
