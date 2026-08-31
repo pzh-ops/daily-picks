@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -81,6 +82,43 @@ CREATE TABLE IF NOT EXISTS clicks (
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- v3（docs/04 §4）
+CREATE TABLE IF NOT EXISTS user_profile (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),   -- 强制单行
+    tags        TEXT NOT NULL DEFAULT '[]',           -- JSON 数组，如 ["AI大模型","创业"]
+    sources     TEXT NOT NULL DEFAULT '[]',           -- JSON 数组，源 key 列表（含自定义）
+    top_n       INTEGER NOT NULL DEFAULT 5 CHECK (top_n BETWEEN 1 AND 10),
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS tag_weights (
+    tag        TEXT PRIMARY KEY,
+    weight     REAL NOT NULL DEFAULT 1.0,             -- 范围 [0.2, 2.0]
+    source     TEXT NOT NULL DEFAULT 'manual',        -- 'manual'|'click'|'feedback'
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS feedback_text (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_text        TEXT NOT NULL,                    -- 用户原始反馈文字
+    intent          TEXT NOT NULL CHECK (intent IN ('like','dislike','expand','adjust','none')),
+    article_id      INTEGER,                          -- 可选：针对某条
+    extracted_tags  TEXT NOT NULL DEFAULT '[]',       -- JSON 数组：反馈中提取的新标签
+    keywords        TEXT NOT NULL DEFAULT '[]',       -- JSON 数组：提取的关键词（进 interest_weights）
+    channel         TEXT NOT NULL DEFAULT 'hermes',   -- 'hermes'|'wecom'
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS source_registry (
+    key        TEXT PRIMARY KEY,                      -- 源 key（rss 自定义源的唯一标识）
+    name       TEXT NOT NULL,                         -- 显示名
+    kind       TEXT NOT NULL DEFAULT 'rss',           -- 'rss'|'builtin'
+    url        TEXT,                                  -- rss url（kind='rss' 必填）
+    tags       TEXT NOT NULL DEFAULT '[]',            -- JSON 数组：关联标签
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    added_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -305,6 +343,83 @@ class Storage:
             "tokens_out": row["tokens_out"],
             "cost_usd": row["cost_usd"],
         }
+
+    # ---- v3 用户画像（docs/04 §4 / docs/05 §1.2）----
+
+    def save_profile(self, tags: list[str], sources: list[str], top_n: int) -> None:
+        """INSERT OR REPLACE user_profile（id=1 单行）。top_n 越界（1-10）抛 StorageError。"""
+        if not 1 <= top_n <= 10:
+            raise StorageError(f"top_n 越界: {top_n}（要求 1-10）")
+        with self._lock:
+            self._execute(
+                "INSERT OR REPLACE INTO user_profile (id, tags, sources, top_n, updated_at)"
+                " VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (json.dumps(tags, ensure_ascii=False), json.dumps(sources, ensure_ascii=False), top_n),
+            )
+
+    def load_profile(self) -> dict | None:
+        """读 user_profile id=1；无行返回 None。dict 含 tags(list)/sources(list)/top_n(int)。"""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT tags, sources, top_n FROM user_profile WHERE id=1").fetchone()
+            except sqlite3.Error as e:
+                raise StorageError(f"读取 user_profile 失败: {e}") from e
+        if row is None:
+            return None
+        return {
+            "tags": json.loads(row["tags"] or "[]"),
+            "sources": json.loads(row["sources"] or "[]"),
+            "top_n": int(row["top_n"]),
+        }
+
+    def save_tag_weight(self, tag: str, weight: float, source: str = "manual") -> None:
+        """UPSERT tag_weights；weight clamp [0.2, 2.0]（docs/04 §4）。"""
+        clamped = max(0.2, min(2.0, weight))
+        with self._lock:
+            self._execute(
+                "INSERT INTO tag_weights (tag, weight, source, updated_at)"
+                " VALUES (?, ?, ?, CURRENT_TIMESTAMP)"
+                " ON CONFLICT(tag) DO UPDATE SET weight=excluded.weight,"
+                " source=excluded.source, updated_at=CURRENT_TIMESTAMP",
+                (tag, clamped, source),
+            )
+
+    def list_tags(self) -> list[tuple[str, float]]:
+        """SELECT tag, weight FROM tag_weights ORDER BY weight DESC。"""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT tag, weight FROM tag_weights ORDER BY weight DESC").fetchall()
+            except sqlite3.Error as e:
+                raise StorageError(f"读取 tag_weights 失败: {e}") from e
+        return [(r["tag"], float(r["weight"])) for r in rows]
+
+    def register_source(self, key: str, name: str, url: str, tags: list[str]) -> None:
+        """INSERT OR REPLACE source_registry（kind='rss'，docs/05 §1.2）。"""
+        with self._lock:
+            self._execute(
+                "INSERT OR REPLACE INTO source_registry (key, name, kind, url, tags, enabled, added_at)"
+                " VALUES (?, ?, 'rss', ?, ?, 1, CURRENT_TIMESTAMP)",
+                (key, name, url, json.dumps(tags, ensure_ascii=False)),
+            )
+
+    def list_sources(self, enabled_only: bool = True) -> list[dict]:
+        """SELECT key, name, kind, url, tags, enabled FROM source_registry；tags 解析为 list。"""
+        sql = "SELECT key, name, kind, url, tags, enabled FROM source_registry"
+        if enabled_only:
+            sql += " WHERE enabled=1"
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql).fetchall()
+            except sqlite3.Error as e:
+                raise StorageError(f"读取 source_registry 失败: {e}") from e
+        result = []
+        for r in rows:
+            item = dict(r)
+            item["tags"] = json.loads(item["tags"] or "[]")
+            result.append(item)
+        return result
 
     # ---- 点击追踪（设计文档 §15.5）----
 
