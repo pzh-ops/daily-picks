@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 
 from daily_picks import deep as deep_mod
-from daily_picks.deep import DeepResult, deep_analyze, deep_filter
+from daily_picks.deep import DeepResult, deep_analyze, deep_filter, format_keywords
 from daily_picks.models import Article, ScoredArticle
 
 
@@ -158,3 +158,12 @@ class TestDeepFilter:
         await deep_filter([make_scored(article_id=1)], FakeSeqLLM([VALID_JSON]),
                           threshold=60, weights={"AI": 2.0})
         assert seen == [{"AI": 2.0}]
+
+
+class TestFormatKeywords:
+    # T-DEEP-09 format_keywords
+    def test_join_and_truncate(self):
+        assert format_keywords(["A", "B", "C", "D", "E", "F"]) == "A、B、C、D、E"
+        assert format_keywords(["A", "B", "C"]) == "A、B、C"
+        assert format_keywords([]) == ""
+    # T-DEEP-10（模板兜底摘要）渲染断言在 tests/test_digest_v3.py::TestBuildDigestV3::test_missing_deep_falls_back_to_summary

@@ -117,3 +117,8 @@ async def deep_filter(candidates: list[ScoredArticle], llm: LLMClient,
         logger.info("deep 过滤后不足 %d 条，降阈值 %d 重试一次", DEEP_MIN_COUNT, threshold - 10)
         filtered = [sa for sa, r in zip(candidates, results) if _keep(r, threshold - 10)]
     return filtered, results
+
+
+def format_keywords(keywords: list[str]) -> str:
+    """'k1、k2、k3' 顿号拼接，超 5 个截断（docs/04 §6.2）。"""
+    return "、".join(keywords[:KEYWORDS_MAX])
