@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from daily_picks.config import RootConfig
-from daily_picks.llm import LLMClient
+from daily_picks.llm import LLMClient, LLMError
 from daily_picks.storage import Storage
 
 logger = logging.getLogger("daily_picks.setup")
@@ -66,3 +67,54 @@ def choose_top_n() -> int:
             print("条数须在 1-10 之间。")
             continue
         return top_n
+
+
+async def recommend_sources(tags: list[str], llm: LLMClient | None, storage: Storage) -> list[str]:
+    """tags ∩ TAG_SOURCE_MAP 的并集为推荐源；llm 非空时 _llm_recommend 补充（注册 source_registry）。
+
+    LLM 失败 fail-open：只记 WARNING，仅用内置映射（docs/04 §10 降级表）。
+    """
+    sources: list[str] = []
+    for tag in tags:
+        for key in TAG_SOURCE_MAP.get(tag, []):
+            if key not in sources:
+                sources.append(key)
+    if llm is not None:
+        try:
+            for key in await _llm_recommend(tags, llm, storage):
+                if key not in sources:
+                    sources.append(key)
+        except LLMError as e:
+            logger.warning("LLM 来源推荐失败（仅用内置映射）: %s", e)
+    return sources
+
+
+async def _llm_recommend(tags: list[str], llm: LLMClient, storage: Storage) -> list[str]:
+    """LLM 按标签推荐信息源（prompt 见 docs/05 §5.3）；url 须以 http(s):// 开头，
+    注册到 source_registry（key=`rss:<名称>`），返回注册成功的源 key 列表。"""
+    system = "你是内容源推荐专家。根据用户兴趣标签推荐高质量深度内容源（RSS）。"
+    user = (
+        f"标签：{'、'.join(tags)}\n"
+        '输出 JSON：{"sources": [{"name": "源名", "url": "https://...rss 地址"}]}（每个标签最多 3 个）'
+    )
+    text = await llm.chat(system, user, json_mode=True)
+    try:
+        data = json.loads(text or "{}")
+    except json.JSONDecodeError as e:
+        logger.warning("LLM 来源推荐输出非法 JSON: %s", e)
+        return []
+    if not isinstance(data, dict):
+        return []
+    keys: list[str] = []
+    for item in data.get("sources", [])[: len(tags) * 3]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        url = str(item.get("url", "")).strip()
+        if not name or not url.startswith(("http://", "https://")):
+            logger.warning("LLM 推荐源被跳过（名称缺失或 url 非法）: %r", item)
+            continue
+        key = f"rss:{name}"
+        storage.register_source(key, name, url, tags)
+        keys.append(key)
+    return keys

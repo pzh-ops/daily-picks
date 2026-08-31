@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import json
+import json as json_mod
 
 import pytest
 
 from daily_picks.config import ConfigError, RootConfig, load_config, save_config, write_default_config
-from daily_picks.setup import DEFAULT_TAGS, TAG_SOURCE_MAP, choose_tags, choose_top_n
+from daily_picks.llm import LLMError
+from daily_picks.setup import (
+    DEFAULT_TAGS,
+    TAG_SOURCE_MAP,
+    _llm_recommend,
+    choose_tags,
+    choose_top_n,
+    recommend_sources,
+)
 from daily_picks.storage import StorageError
 
 
@@ -151,3 +160,83 @@ class TestChooseTopN:
         monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
         assert choose_top_n() == 3
         assert "1-10" in capsys.readouterr().out
+
+
+class FakeChatLLM:
+    """mock LLMClient.chat：返回预置 JSON 文本，记录调用参数。"""
+
+    def __init__(self, reply: str = ""):
+        self.reply = reply
+        self.calls: list[tuple[str, str]] = []
+
+    async def chat(self, system: str, user: str, json_mode: bool = True) -> str:
+        self.calls.append((system, user))
+        return self.reply
+
+
+class TestRecommendSources:
+    # T-SETUP-04 来源推荐内置映射
+    async def test_builtin_map(self, tmp_db):
+        sources = await recommend_sources(["AI大模型"], None, tmp_db)
+        assert sources == ["hnews", "infoq", "rss:机器之心"]
+
+    # T-SETUP-11 无 LLM 降级
+    async def test_without_llm_uses_builtin_only(self, tmp_db):
+        sources = await recommend_sources(["AI大模型", "编程开发"], None, tmp_db)
+        assert set(sources) == {"hnews", "infoq", "rss:机器之心", "juejin", "rss:阮一峰"}
+        assert tmp_db.list_sources() == []  # 无 LLM → 不注册任何自定义源
+
+    def test_map_union_dedupes(self):
+        assert TAG_SOURCE_MAP["AI大模型"][0] == "hnews"
+
+
+class TestLlmRecommend:
+    def _llm(self, reply: str) -> FakeChatLLM:
+        return FakeChatLLM(reply)
+
+    # T-SETUP-05 LLM 来源推荐
+    async def test_registers_sources(self, tmp_db):
+        llm = self._llm(json_mod.dumps(
+            {"sources": [{"name": "机器之心", "url": "https://www.jiqizhixin.com/rss"}]},
+            ensure_ascii=False))
+        keys = await _llm_recommend(["AI大模型"], llm, tmp_db)
+        assert keys == ["rss:机器之心"]
+        rows = tmp_db.list_sources()
+        assert rows[0]["key"] == "rss:机器之心"
+        assert rows[0]["url"] == "https://www.jiqizhixin.com/rss"
+
+    # T-SETUP-06 非法 url 跳过
+    async def test_skips_invalid_url(self, tmp_db):
+        llm = self._llm('{"sources": [{"name": "x", "url": "not-a-url"}]}')
+        assert await _llm_recommend(["AI大模型"], llm, tmp_db) == []
+        assert tmp_db.list_sources() == []
+
+    async def test_invalid_json_returns_empty(self, tmp_db):
+        llm = self._llm("这不是JSON")
+        assert await _llm_recommend(["AI大模型"], llm, tmp_db) == []
+
+    async def test_llm_error_fail_open(self, tmp_db):
+        class RaisingLLM:
+            async def chat(self, system, user, json_mode=True):
+                raise LLMError("boom")
+
+        sources = await recommend_sources(["AI大模型"], RaisingLLM(), tmp_db)
+        assert sources == ["hnews", "infoq", "rss:机器之心"]  # 仅内置映射，不抛错
+
+
+class TestLlmChat:
+    """补充用例：LLMClient.chat 契约（docs/05 §0）。"""
+
+    async def test_chat_strips_fences_and_passes_messages(self):
+        class FakeClient:
+            async def _chat(self, messages, **kw):
+                self.messages = messages
+                return {"choices": [{"message": {"content": "```json\n{\"a\": 1}\n```"}}]}
+
+        client = FakeClient()
+        # 直接绑定 LLMClient.chat 到假实例（验证消息构造与围栏剥离）
+        from daily_picks.llm import LLMClient
+        text = await LLMClient.chat(client, "sys", "user")
+        assert text == '{"a": 1}'
+        assert client.messages == [{"role": "system", "content": "sys"},
+                                   {"role": "user", "content": "user"}]
