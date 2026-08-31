@@ -14,9 +14,9 @@ import secrets
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from daily_picks.feedback import hit_keywords
 from daily_picks.models import ClickEvent
 from daily_picks.storage import Storage
+from daily_picks.weights import _bump_keywords
 
 logger = logging.getLogger("daily_picks.tracking")
 
@@ -150,10 +150,7 @@ def apply_click(storage: Storage, article_id: int, delta: float) -> dict:
     rows = storage.get_articles_by_ids([article_id])
     if not rows:
         return {"updated": [], "missing": True}
-    weights = storage.get_interest_weights()
-    hits = hit_keywords(rows[0]["title"], rows[0]["summary"], weights)
-    for kw in hits:
-        storage.bump_keyword_weight(kw, delta)
+    hits = _bump_keywords(f"{rows[0]['title'] or ''} {rows[0]['summary'] or ''}", delta, storage)
     logger.info("点击回写 article_id=%s 命中关键词=%s delta=%s", article_id, hits, delta)
     return {"updated": hits, "missing": False}
 
