@@ -1,0 +1,68 @@
+"""v3 启动向导：标签/来源/条数 → user_profile + config.yaml（docs/04 §6.1 / docs/05 §1）。"""
+
+from __future__ import annotations
+
+import logging
+
+from daily_picks.config import RootConfig
+from daily_picks.llm import LLMClient
+from daily_picks.storage import Storage
+
+logger = logging.getLogger("daily_picks.setup")
+
+# 默认标签（docs/04 §6.1，锁定）
+DEFAULT_TAGS: list[str] = [
+    "AI大模型", "编程开发", "创业商业", "投资经济", "人文历史", "个人成长",
+]
+
+# 默认标签 → 内置源推荐（docs/04 §6.1，锁定；key 见 §6.5）
+TAG_SOURCE_MAP: dict[str, list[str]] = {
+    "AI大模型": ["hnews", "infoq", "rss:机器之心"],
+    "编程开发": ["juejin", "hnews", "rss:阮一峰"],
+    "创业商业": ["rss:36氪", "rss:虎嗅"],
+    "投资经济": ["rss:华尔街见闻", "rss:雪球"],
+    "人文历史": ["rss:知乎日报", "rss:豆瓣书评"],
+    "个人成长": ["rss:少数派", "rss:得到"],
+}
+
+
+def choose_tags(llm: LLMClient | None = None) -> list[str]:
+    """展示 DEFAULT_TAGS 多选（逗号分隔序号），支持 '自定义:xxx' 追加。空回车 = 默认前 3 个。
+
+    llm 参数为 docs/04 §6.1 锁定签名预留（本期交互选标签不调用 LLM）。
+    """
+    print("选择你感兴趣的主题标签（可多选）：")
+    for i, tag in enumerate(DEFAULT_TAGS, start=1):
+        print(f"  {i}. {tag}")
+    raw = input("输入序号（逗号分隔），或 `自定义:xxx` 追加，空回车 = 默认前 3 个: ").strip()
+    if not raw:
+        return list(DEFAULT_TAGS[:3])
+    tags: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith("自定义:"):
+            custom = part.split(":", 1)[1].strip()
+            if custom:
+                tags.append(custom)
+        elif part.isdigit() and 1 <= int(part) <= len(DEFAULT_TAGS):
+            tags.append(DEFAULT_TAGS[int(part) - 1])
+    return tags or list(DEFAULT_TAGS[:3])  # 全部非法输入 → 回退默认前 3 个
+
+
+def choose_top_n() -> int:
+    """输入每日条数，默认 5，范围 1-10（越界/非法重输，docs/04 §6.1）。"""
+    while True:
+        raw = input("每日推送条数（1-10，回车默认 5）: ").strip()
+        if not raw:
+            return 5
+        try:
+            top_n = int(raw)
+        except ValueError:
+            print("请输入数字。")
+            continue
+        if not 1 <= top_n <= 10:
+            print("条数须在 1-10 之间。")
+            continue
+        return top_n

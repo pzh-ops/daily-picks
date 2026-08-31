@@ -7,6 +7,7 @@ import json
 import pytest
 
 from daily_picks.config import ConfigError, RootConfig, load_config, save_config, write_default_config
+from daily_picks.setup import DEFAULT_TAGS, TAG_SOURCE_MAP, choose_tags, choose_top_n
 from daily_picks.storage import StorageError
 
 
@@ -111,3 +112,42 @@ class TestProfileStorage:
         assert rows[0]["tags"] == ["AI大模型"]
         assert json.loads(tmp_db._conn.execute(
             "SELECT tags FROM source_registry").fetchone()[0]) == ["AI大模型"]
+
+
+class TestChooseTags:
+    # T-SETUP-01 默认标签展示
+    def test_default_first_three(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        assert choose_tags() == DEFAULT_TAGS[:3]
+
+    # T-SETUP-02 序号多选
+    def test_index_multi_select(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda prompt="": "1,3,5")
+        assert choose_tags() == ["AI大模型", "创业商业", "人文历史"]
+
+    # T-SETUP-03 自定义标签
+    def test_custom_tag(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda prompt="": "自定义:量子计算")
+        assert choose_tags() == ["量子计算"]
+
+    def test_mixed_select_and_custom(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda prompt="": "1, 自定义:量子计算")
+        assert choose_tags() == ["AI大模型", "量子计算"]
+
+    def test_all_invalid_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda prompt="": "99,xyz")
+        assert choose_tags() == DEFAULT_TAGS[:3]
+
+
+class TestChooseTopN:
+    # T-SETUP-07 条数默认
+    def test_default_five(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        assert choose_top_n() == 5
+
+    # T-SETUP-08 越界重输
+    def test_out_of_range_reprompts(self, monkeypatch, capsys):
+        inputs = iter(["99", "3"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        assert choose_top_n() == 3
+        assert "1-10" in capsys.readouterr().out
