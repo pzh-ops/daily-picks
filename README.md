@@ -10,7 +10,7 @@
 > 最小可用的个人 Agent 范式：采集（Collect）→ 理解（Understand）→ 决策（Decide）→ 推送（Deliver），
 > 外加一个可学习的偏好反馈闭环。
 
-**当前进度**：M0 脚手架 ✅ · M1 采集层 ✅ · M2 排序与 LLM 精排 ✅ · M3 简报与微信推送 ✅ · M4 调度闭环 ✅ · M5 打磨开源 ✅
+**当前进度**：M0 脚手架 ✅ · M1 采集层 ✅ · M2 排序与 LLM 精排 ✅ · M3 简报与微信推送 ✅ · M4 调度闭环 ✅ · M5 打磨开源 ✅ · M10-M13 v3 深度精选 ✅
 
 ## 目录
 
@@ -21,6 +21,7 @@
 - [工作原理](#工作原理)
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
+- [v3 深度内容精选（M10+）](#v3-深度内容精选m10)
 - [真实运行效果](#真实运行效果)
 - [开发](#开发)
 - [贡献](#贡献)
@@ -180,6 +181,82 @@ LLM 参数（模型默认 `deepseek-v4-pro`）、兴趣关键词权重、推送�
 | `DEEPSEEK_API_KEY` | DeepSeek LLM API Key | ✅ |
 | `WECOM_WEBHOOK_KEY` | 企业微信机器人 webhook key（推送渠道二选一） | 选填 |
 | `SERVERCHAN_SENDKEY` | Server酱 SendKey（推送渠道二选一） | 选填 |
+
+## v3 深度内容精选（M10+）
+
+v3 定位"少而精"：用 LLM 对候选做**深度评分**（观点原创性 / 论证扎实度 / 信息密度 /
+启发价值），过滤低分内容后按 v3 模板推送；新增**用户画像**（标签 / 信息源 / 每日条数）
+与**文字反馈闭环**。`profile.enabled: false`（默认）时行为与 v2 完全一致，可随时切换。
+
+### 启用：一键向导
+
+```bash
+uv run daily-picks setup                     # 交互式向导
+uv run daily-picks setup <<< $'1,2\n\n3\n'   # 管道输入：标签选 1、2，信息源默认，每日 3 条
+```
+
+向导流程：选择兴趣标签（输入序号逗号分隔，可 `自定义:xxx` 追加，空回车 = 默认前 3 个）
+→ 信息源推荐（内置映射 + LLM 按标签补充新源）→ 每日条数（默认 5，范围 1-10）→ 写回
+config.yaml（`profile.enabled` 自动置 `true`）。完成后输出"配置完成：标签 n 个、信息源 n 个、
+每日 n 条。"，可随时重跑。
+
+### 文字反馈（与 like/dislike 共存）
+
+`feedback like|dislike <id>` 原用法不变；不带 id 的纯文字自动走 v3 文字反馈路径：
+
+```bash
+uv run daily-picks feedback like 12            # 原用法：like/dislike 调整关键词权重
+uv run daily-picks feedback "多推点AI硬件"      # v3 文字反馈：意图 expand，新标签并入画像
+uv run daily-picks feedback "每天推3条就行"     # 意图 adjust：每日条数改为 3
+```
+
+文字反馈意图：like/dislike（含文章 id 时生效）、expand（新标签权重 1.5 并入画像）、
+adjust（调整每日条数 1-10）、none；提取的关键词写入 interest_weights（可关）。无 LLM key
+或解析失败时走启发式兜底，不阻断。反馈全部落库，`daily-picks stats` 可查看计数。
+
+### v3 推送格式
+
+启用后（`run` 推送，或 `run --dry-run` 预览 logs/last_digest.md）为 v3 模板——推荐理由与
+关键词替代 v2 的摘要行：
+
+```
+📚 今日深度精选（5条）
+──────────────
+【Hacker News】标题：xxx
+关键词：A、B、C
+推荐理由：文章用 X 数据论证了 Y 观点，其中 Z 的对比特别值得注意……
+链接：https://...
+作者：xxx
+──────────────
+（后续条目同上）
+```
+
+### v3 配置段（config.yaml）
+
+`daily-picks setup` 自动写入（缺省用默认值，也可手动编辑）：
+
+```yaml
+profile:
+  enabled: false            # v3 深度精选开关；setup 向导完成后自动置 true
+  top_n: 5                  # 每日推送条数（1-10）
+  deep_threshold: 60        # 深度评分阈值（0-100），低于此值不推送
+  deep_candidates: 40       # deep 阶段最多评分的候选数（LLM 成本控制）
+  tags: []                  # 兴趣标签（setup 写入 user_profile）
+  sources: []               # 信息源（setup 写入 user_profile）
+
+feedback:
+  channel: hermes           # 反馈通道：'hermes'（本期）| 'wecom'（后期）
+  extract_keywords: true    # 文字反馈是否提取关键词写入 interest_weights
+```
+
+`profile.enabled` 是 v3/v2 切换开关：`false` = 完全 v2 行为（规则打分 → LLM 精排 → 原简报
+模板，不走 deep 阶段、不用 v3 模板），老配置零影响；`true` = v3 深度精选流程。
+
+### 查看 v3 状态
+
+```bash
+uv run daily-picks stats    # 输出含 v3 计数：文字反馈 / 标签权重 / 用户画像状态
+```
 
 ## 真实运行效果
 

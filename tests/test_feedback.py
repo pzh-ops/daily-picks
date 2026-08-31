@@ -127,7 +127,7 @@ class TestApplyFeedbackEdges:
 
 
 def test_hit_keywords_public_helper():  # T-FBK-HIT
-    """hit_keywords 公开供 tracking 复用：大小写不敏感、返回权重表插入序。"""
+    """hit_keywords 关键词命中口径参考实现：大小写不敏感、返回权重表插入序。"""
     from daily_picks.feedback import hit_keywords
     assert hit_keywords("AI 编程工具", "大模型实战", {"AI": 1.0, "大模型": 1.5}) == ["AI", "大模型"]
     assert hit_keywords("Rust 入门", None, {"AI": 1.0, "rust": 1.0}) == ["rust"]
