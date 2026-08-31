@@ -13,6 +13,9 @@
    若发现文档与实际情况冲突（如 API 变更），先改文档再改代码，并在提交信息中注明。
 5. **完成标准**：`pytest` 全绿 + 覆盖率 ≥85%（核心模块）+ `daily-picks run --dry-run` 可出预览。
 6. 环境：Python 3.11 + uv。所有依赖通过 `uv add` 管理。不要使用 pip 直接安装。
+7. **修改任何 daily_picks/ 或 worker/ 代码后，必须重启常驻服务**：`systemctl --user restart daily-picks.service`。
+   ⚠️ 服务是 APScheduler 进程内调度，模块在启动时加载，改文件不会热生效——
+   不重启 = 线上继续跑旧代码（2026-08-31 知乎链接事故教训，见设计文档 §16.3）。
 7. 提交信息格式：`<milestone>: <模块> - <一句话描述>`，如 `M2: ranker - 实现规则打分与候选筛选`。
 
 ## 关键约束
