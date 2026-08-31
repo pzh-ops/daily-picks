@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
 
 from daily_picks.llm import LLMClient, LLMError
-from daily_picks.models import Article
+from daily_picks.models import Article, ScoredArticle
 
 logger = logging.getLogger("daily_picks.deep")
 
@@ -78,3 +79,41 @@ async def deep_analyze(article: Article, llm: LLMClient,
 
     return DeepResult(article_id=0, deep_score=score_raw if isinstance(score_raw, int) else 0,
                       keywords=keywords, reason=reason, ok=ok)
+
+
+async def deep_filter(candidates: list[ScoredArticle], llm: LLMClient,
+                      threshold: int,
+                      weights: dict[str, float] | None = None) -> tuple[list[ScoredArticle], list[DeepResult]]:
+    """批量 deep_analyze（并发 ≤3，单篇 DEEP_TIMEOUT_S 超时），保留 deep_score >= threshold 的候选。
+
+    ok=False（LLM 失败/超时/输出非法）的文章**保留**（fail-open，不因 deep 故障丢候选）；
+    过滤后不足 DEEP_MIN_COUNT 条且 threshold-10 >= 0 时，按首轮结果降阈值重过滤一次
+    （不重复调用 LLM，docs/04 §10 降级表）。返回 (过滤后候选, 全量 DeepResult 列表)。
+    """
+    if not candidates:
+        return [], []
+    weights = weights or {}
+    sem = asyncio.Semaphore(3)
+
+    async def _analyze_one(sa: ScoredArticle) -> DeepResult:
+        async with sem:
+            try:
+                result = await asyncio.wait_for(
+                    deep_analyze(sa.article, llm, weights), timeout=DEEP_TIMEOUT_S)
+            except TimeoutError:
+                logger.warning("deep 分析超时 article_id=%s（fail-open 保留）", sa.article_id)
+                return DeepResult(article_id=sa.article_id, deep_score=0,
+                                  keywords=[], reason="", ok=False)
+            result.article_id = sa.article_id if sa.article_id is not None else 0
+            return result
+
+    results = await asyncio.gather(*(_analyze_one(sa) for sa in candidates))
+
+    def _keep(r: DeepResult, th: int) -> bool:
+        return (not r.ok) or r.deep_score >= th
+
+    filtered = [sa for sa, r in zip(candidates, results) if _keep(r, threshold)]
+    if len(filtered) < DEEP_MIN_COUNT and threshold - 10 >= 0:
+        logger.info("deep 过滤后不足 %d 条，降阈值 %d 重试一次", DEEP_MIN_COUNT, threshold - 10)
+        filtered = [sa for sa, r in zip(candidates, results) if _keep(r, threshold - 10)]
+    return filtered, results
