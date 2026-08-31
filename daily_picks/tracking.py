@@ -180,6 +180,10 @@ async def sync_clicks(storage: Storage, client: TrackingClient,
                     applied += 1
             synced += 1
             after = max(after, ev.remote_id)
+        # 游标协作（docs/05 §4.1 修订）：同步时已回写权重，推进演化游标避免双重回写。
+        # 逐页推进：若后续页 fetch_clicks 失败（部分失败），本页已回写行仍受演化游标保护，
+        # 不会在下次同步时被 evolve_weights 重复 +delta。
+        storage.set_meta(CLICK_CURSOR_KEY, str(storage.get_max_click_id()))
         if not has_more:
             break
         if not events:
@@ -188,7 +192,5 @@ async def sync_clicks(storage: Storage, client: TrackingClient,
             break
     if after > cursor:
         storage.set_click_cursor(after)
-    # 游标协作（docs/05 §4.1 修订）：同步时已回写权重，推进演化游标避免双重回写
-    storage.set_meta(CLICK_CURSOR_KEY, str(storage.get_max_click_id()))
     logger.info("点击同步完成 cursor=%s synced=%s applied=%s", after, synced, applied)
     return {"synced": synced, "applied": applied}
