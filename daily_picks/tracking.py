@@ -14,6 +14,7 @@ import secrets
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from daily_picks.feedback import CLICK_CURSOR_KEY
 from daily_picks.models import ClickEvent
 from daily_picks.storage import Storage
 from daily_picks.weights import _bump_keywords
@@ -187,5 +188,7 @@ async def sync_clicks(storage: Storage, client: TrackingClient,
             break
     if after > cursor:
         storage.set_click_cursor(after)
+    # 游标协作（docs/05 §4.1 修订）：同步时已回写权重，推进演化游标避免双重回写
+    storage.set_meta(CLICK_CURSOR_KEY, str(storage.get_max_click_id()))
     logger.info("点击同步完成 cursor=%s synced=%s applied=%s", after, synced, applied)
     return {"synced": synced, "applied": applied}

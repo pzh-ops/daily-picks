@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from daily_picks.config import ConfigError
 from daily_picks.llm import LLMClient, LLMError
 from daily_picks.storage import Storage
+from daily_picks.weights import _bump_keywords
 
 logger = logging.getLogger("daily_picks.feedback")
 
@@ -24,7 +25,7 @@ class FeedbackError(Exception):
 
 def hit_keywords(title: str | None, summary: str | None, weights: dict[str, float]) -> list[str]:
     """title+summary 中命中的关键词（大小写不敏感子串匹配，对齐 §7.1 keyword_score）。
-    公开供 tracking.apply_click 复用（点击回写与 like 同口径取词）。"""
+    匹配准则基准：weights._bump_keywords 与 like 反馈均按此口径取词。"""
     text = f"{title or ''} {summary or ''}".lower()
     return [kw for kw in weights if kw and kw.lower() in text]
 
@@ -218,3 +219,35 @@ def _apply_text_feedback(fb: ParsedFeedback, storage: Storage,
     if extract_keywords:
         for kw in fb.keywords:
             storage.bump_keyword_weight(kw, 0.1)
+
+
+# ---- v3 权重演化（docs/04 §6.3 / docs/05 §4.1）----
+
+CLICK_CURSOR_KEY = "last_weight_evolve_id"      # clicks.id 演化游标（meta 表）
+FEEDBACK_CURSOR_KEY = "last_feedback_evolve_id"  # feedback_text.id 演化游标（meta 表）
+CLICK_EVOLVE_DELTA = 0.05                        # 点击弱信号（对齐 tracking.click_delta 默认值）
+EXPAND_EVOLVE_DELTA = 0.1                        # 扩展标签强化步长
+
+
+def evolve_weights(storage: Storage) -> None:
+    """点击/反馈驱动的权重演化（docs/04 §6.3）：
+    1. clicks 增量（游标 last_weight_evolve_id）→ 文章 title+summary 关键词 +0.05
+    2. feedback_text 中 intent='expand' 未处理的（游标 last_feedback_evolve_id）→ 标签关键词 +0.1
+    3. 写入全部经 bump_keyword_weight 钳制 [0.2, 2.0]；游标单调推进（幂等，可反复调用）。
+    """
+    click_cursor = int(storage.get_meta(CLICK_CURSOR_KEY) or 0)
+    for row in storage.get_clicks_since(click_cursor):
+        _bump_keywords(f"{row['title'] or ''} {row['summary'] or ''}",
+                       CLICK_EVOLVE_DELTA, storage)
+        click_cursor = max(click_cursor, int(row["id"]))
+    if click_cursor:
+        storage.set_meta(CLICK_CURSOR_KEY, str(click_cursor))
+
+    fb_cursor = int(storage.get_meta(FEEDBACK_CURSOR_KEY) or 0)
+    for row in storage.get_feedback_text_since(fb_cursor):
+        if row["intent"] == "expand":
+            for tag in row["extracted_tags"]:
+                storage.bump_keyword_weight(tag, EXPAND_EVOLVE_DELTA)
+        fb_cursor = max(fb_cursor, int(row["id"]))
+    if fb_cursor:
+        storage.set_meta(FEEDBACK_CURSOR_KEY, str(fb_cursor))

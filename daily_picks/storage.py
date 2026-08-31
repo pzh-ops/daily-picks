@@ -487,3 +487,47 @@ class Storage:
             except sqlite3.Error as e:
                 raise StorageError(f"统计 clicks 失败: {e}") from e
         return int(row[0])
+
+    # ---- v3 权重演化查询（docs/05 §4.1）----
+
+    def get_clicks_since(self, click_id: int) -> list[dict]:
+        """clicks.id > click_id 的行（LEFT JOIN articles 取 title/summary；文章已删则为 None）。"""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT c.id, a.title, a.summary FROM clicks c"
+                    " LEFT JOIN articles a ON a.id = c.article_id"
+                    " WHERE c.id > ? ORDER BY c.id", (click_id,),
+                ).fetchall()
+            except sqlite3.Error as e:
+                raise StorageError(f"读取 clicks 增量失败: {e}") from e
+        return [dict(r) for r in rows]
+
+    def get_feedback_text_since(self, feedback_id: int) -> list[dict]:
+        """feedback_text.id > feedback_id 的行；extracted_tags 解析为 list。"""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, intent, extracted_tags FROM feedback_text"
+                    " WHERE id > ? ORDER BY id", (feedback_id,),
+                ).fetchall()
+            except sqlite3.Error as e:
+                raise StorageError(f"读取 feedback_text 增量失败: {e}") from e
+        result = []
+        for r in rows:
+            item = dict(r)
+            try:
+                item["extracted_tags"] = json.loads(item["extracted_tags"] or "[]")
+            except json.JSONDecodeError:
+                item["extracted_tags"] = []
+            result.append(item)
+        return result
+
+    def get_max_click_id(self) -> int:
+        """clicks 表最大 id（无行返回 0）；sync 与 evolve 游标协作用（docs/05 §4.1 修订）。"""
+        with self._lock:
+            try:
+                row = self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM clicks").fetchone()
+            except sqlite3.Error as e:
+                raise StorageError(f"统计 clicks 失败: {e}") from e
+        return int(row[0])
