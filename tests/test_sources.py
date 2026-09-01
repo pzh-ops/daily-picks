@@ -291,7 +291,8 @@ class TestHNews:
         assert a.source == "hnews"
         assert a.source_key == "49448321"
         assert a.title == "AWS Acquires DuckLabs"
-        assert a.url == "https://ducklabs.com/news/2026/08/26/ducklabs-to-join-aws"
+        # 2026-09-01 修订：url 一律 HN 讨论页（Launch HN 类原 url 是官网主页，语义不符）
+        assert a.url == "https://news.ycombinator.com/item?id=49448321"
         assert a.author == "onderkalaci"
         assert a.published_at == datetime.fromisoformat("2026-08-26T12:59:26+00:00").astimezone().replace(
             tzinfo=None
@@ -317,14 +318,16 @@ class TestHNews:
             return httpx.Response(200, json={"hits": [
                 {"objectID": "1"},  # 缺 title → 跳过
                 {"objectID": "2", "title": "无 created_at 条目", "url": "https://example.com/h2"},
-                {"objectID": "3", "title": "非 http(s) 链接", "url": "ftp://bad.example.com"},  # 清洗失败 → 跳过
+                # 2026-09-01 修订：url 恒为 HN 讨论页（Algolia url 不再使用），原"非 http(s)
+                # 链接清洗失败"场景不复存在；条目 3 正常入列
+                {"objectID": "3", "title": "第三条", "url": "ftp://bad.example.com"},
             ]})
 
         mock_http.get(HN_URL).mock(side_effect=handler)
         articles = await HNewsAdapter().fetch(SourceSection(hits_per_page=25), client)
         assert captured["url"].params["hitsPerPage"] == "25"
         assert captured["url"].params["tags"] == "front_page"
-        assert [a.source_key for a in articles] == ["2"]
+        assert [a.source_key for a in articles] == ["2", "3"]
         assert articles[0].published_at is None  # 缺 created_at → parse_iso_z(None)
         assert await HNewsAdapter().fetch(SourceSection(hits_per_page=25), client) == []  # 500 隔离
 

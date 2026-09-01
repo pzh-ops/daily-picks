@@ -33,7 +33,9 @@ def parse_iso_z(s: str | None) -> datetime | None:
 
 
 class HNewsAdapter(SourceAdapter):
-    """Hacker News 首页：Algolia 单请求即可，无需两步取 item；url 为空（Ask HN）回退 item 页。"""
+    """Hacker News 首页：Algolia 单请求；url 一律为 HN 讨论页 item?id=（2026-09-01 修订：
+    原逻辑用 Algolia 原文 url，但 Launch HN 类帖子的 url 是项目官网主页，与【Hacker News】
+    标注不符；HN 讨论页自带原文链接。设计文档 §6.5 / 开发文档 §4.8 已同步）。"""
 
     name = "hnews"
 
@@ -50,7 +52,7 @@ class HNewsAdapter(SourceAdapter):
                 if not h.get("objectID") or not h.get("title"):
                     logger.warning("hnews 条目缺 objectID/title，跳过")
                     continue
-                url = h.get("url") or _ITEM_URL.format(object_id=h["objectID"])
+                url = _ITEM_URL.format(object_id=h["objectID"])
                 try:
                     title, _summary, url = self._clean(h["title"], None, url)
                 except SourceError as e:
