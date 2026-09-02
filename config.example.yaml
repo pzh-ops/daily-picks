@@ -30,7 +30,8 @@ interests:
     - {keyword: "开源", weight: 1.0}
 
 sources:
-  enabled: [rss, bilibili, zhihu, juejin, hnews, infoq]
+  # 2026-09-01：hnews/bilibili/zhihu 停用（国内可达性/内容深度），默认 rss+juejin+infoq
+  enabled: [rss, juejin, infoq]
   rss:
     urls:
       - https://sspai.com/feed
