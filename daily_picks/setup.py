@@ -17,13 +17,21 @@ DEFAULT_TAGS: list[str] = [
 ]
 
 # 默认标签 → 内置源推荐（docs/04 §6.1，锁定；key 见 §6.5）
+# 2026-09-01 修订：仅保留实测有效的源——hnews 停用（国内不可达）；
+# 36氪/虎嗅/机器之心等国内平台公开 RSS 已关闭（返回 HTML/404），从内置推荐移除。
 TAG_SOURCE_MAP: dict[str, list[str]] = {
-    "AI大模型": ["hnews", "infoq", "rss:机器之心"],
-    "编程开发": ["juejin", "hnews", "rss:阮一峰"],
-    "创业商业": ["rss:36氪", "rss:虎嗅"],
-    "投资经济": ["rss:华尔街见闻", "rss:雪球"],
-    "人文历史": ["rss:知乎日报", "rss:豆瓣书评"],
-    "个人成长": ["rss:少数派", "rss:得到"],
+    "AI大模型": ["infoq"],
+    "编程开发": ["juejin", "rss:阮一峰"],
+    "创业商业": [],
+    "投资经济": [],
+    "人文历史": [],
+    "个人成长": ["rss:少数派"],
+}
+
+# 内置推荐 rss 源的 url（2026-09-01 实测有效；recommend_sources 据此注册 source_registry）
+SOURCE_URLS: dict[str, str] = {
+    "rss:阮一峰": "https://www.ruanyifeng.com/blog/atom.xml",
+    "rss:少数派": "https://sspai.com/feed",
 }
 
 
@@ -79,6 +87,14 @@ async def recommend_sources(tags: list[str], llm: LLMClient | None, storage: Sto
         for key in TAG_SOURCE_MAP.get(tag, []):
             if key not in sources:
                 sources.append(key)
+    # 内置推荐 rss 源注册到 source_registry（2026-09-01 修复：此前只列 key 不注册，采集不到）
+    for key in sources:
+        url = SOURCE_URLS.get(key)
+        if url:
+            try:
+                storage.register_source(key, key.removeprefix("rss:"), url, [tag for tag in tags if key in TAG_SOURCE_MAP.get(tag, [])])
+            except Exception:  # noqa: BLE001 —— 注册失败不影响推荐列表
+                logger.warning("内置源注册失败: %s", key)
     if llm is not None:
         try:
             for key in await _llm_recommend(tags, llm, storage):

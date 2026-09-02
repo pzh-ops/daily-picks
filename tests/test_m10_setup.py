@@ -177,19 +177,21 @@ class FakeChatLLM:
 
 
 class TestRecommendSources:
-    # T-SETUP-04 来源推荐内置映射
+    # T-SETUP-04 来源推荐内置映射（2026-09-01 修订：hnews 停用、机器之心 RSS 已关闭）
     async def test_builtin_map(self, tmp_db):
         sources = await recommend_sources(["AI大模型"], None, tmp_db)
-        assert sources == ["hnews", "infoq", "rss:机器之心"]
+        assert sources == ["infoq"]
 
     # T-SETUP-11 无 LLM 降级
     async def test_without_llm_uses_builtin_only(self, tmp_db):
         sources = await recommend_sources(["AI大模型", "编程开发"], None, tmp_db)
-        assert set(sources) == {"hnews", "infoq", "rss:机器之心", "juejin", "rss:阮一峰"}
-        assert tmp_db.list_sources() == []  # 无 LLM → 不注册任何自定义源
+        assert set(sources) == {"infoq", "juejin", "rss:阮一峰"}
+        # 2026-09-01 修订：内置 rss 源注册到 registry（此前只列 key 不注册，采集不到）
+        registered = [s["key"] for s in tmp_db.list_sources()]
+        assert "rss:阮一峰" in registered
 
     def test_map_union_dedupes(self):
-        assert TAG_SOURCE_MAP["AI大模型"][0] == "hnews"
+        assert TAG_SOURCE_MAP["编程开发"][0] == "juejin"
 
 
 class TestLlmRecommend:
@@ -223,7 +225,7 @@ class TestLlmRecommend:
                 raise LLMError("boom")
 
         sources = await recommend_sources(["AI大模型"], RaisingLLM(), tmp_db)
-        assert sources == ["hnews", "infoq", "rss:机器之心"]  # 仅内置映射，不抛错
+        assert sources == ["infoq"]  # 仅内置映射，不抛错（2026-09-01 修订：hnews/机器之心移除）
 
 
 class TestLlmChat:
@@ -264,7 +266,7 @@ class TestRunSetup:
         assert profile is not None
         assert profile["tags"] == ["AI大模型", "编程开发"]
         assert profile["top_n"] == 3
-        assert set(profile["sources"]) >= {"hnews", "infoq", "juejin", "rss:机器之心", "rss:阮一峰"}
+        assert set(profile["sources"]) >= {"infoq", "juejin", "rss:阮一峰"}  # 2026-09-01 修订
         cfg2 = load_config("config.yaml")  # config.yaml 已写回
         assert cfg2.profile.enabled is True
         assert cfg2.profile.top_n == 3
