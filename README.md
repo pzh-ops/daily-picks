@@ -4,7 +4,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
-每天自动从 **B站 / 知乎 / 掘金 / Hacker News / InfoQ / RSS** 聚合候选内容，用 LLM 按个人兴趣
+每天自动从 **B站 / 知乎 / 掘金 / InfoQ / RSS** 聚合候选内容，用 LLM 按个人兴趣
 筛选排序、去重，生成"每日精选"简报并推送到微信的个人 Agent。
 
 > 最小可用的个人 Agent 范式：采集（Collect）→ 理解（Understand）→ 决策（Decide）→ 推送（Deliver），
@@ -31,7 +31,7 @@
 
 | 需求 | 功能 | 状态 |
 |---|---|---|
-| R-001 | ≥6 类内容源（RSS/B站/知乎/掘金/HN/InfoQ），每源独立开关、失败隔离 | ✅ M1 |
+| R-001 | ≥5 类内容源（RSS/B站/知乎/掘金/InfoQ），每源独立开关、失败隔离；hnews 因国内不可达已停用（2026-09-01） | ✅ M1 |
 | R-002 | 跨源去重（content_hash 唯一约束） | ✅ M0 |
 | R-003 | 规则打分：关键词权重 + 来源权重 + 时效加成 | ✅ M2 |
 | R-004 | LLM 精排（DeepSeek v4-pro，非法输出自动降级规则分） | ✅ M2 |
